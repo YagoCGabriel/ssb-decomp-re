@@ -1,7 +1,6 @@
-# Compiled/Binary files
+# Build artifacts
 *.o
-*.obj
-test_gbi
-
-# Build directories
 build/
+
+# Test output artifacts
+*.rgba

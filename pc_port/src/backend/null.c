@@ -117,6 +117,13 @@ static void nullClear(PcBackend *self, uint32_t color, float depth)
     pcswClear(&nb->raster, color, depth);
 }
 
+static void nullGetSize(PcBackend *self, int *w, int *h)
+{
+    NullBackend *nb = (NullBackend *)self;
+    if (w) *w = nb->raster.width;
+    if (h) *h = nb->raster.height;
+}
+
 PcBackend *backendCreateNull(void)
 {
     static PcBackend iface;
@@ -139,6 +146,7 @@ PcBackend *backendCreateNull(void)
     iface.draw_triangles = nullDrawTri;
     iface.fill_rect = nullFillRect;
     iface.clear = nullClear;
+    iface.get_size = nullGetSize;
     g_null.base = iface;
     (void)nullNoop;
     return &g_null.base;

@@ -17,7 +17,7 @@
 #define OP_LINE3D        0x08
 #define OP_SETOTHERMODE_H 0xE3
 #define OP_SETOTHERMODE_L 0xE2
-#define OP_RDPHALF_1     0xE1
+#define OP_RDPHALF_1     0xB4 /* F3DEX2 gsSPHalf1 (NOT 0xE1: that is DP SetFillRate) */
 #define OP_RDPHALF_2     0xF1
 #define OP_ENDDL         0xDF
 #define OP_DL            0xDE  /* gSPDisplayList (mode bit in w1 low bit = 0)

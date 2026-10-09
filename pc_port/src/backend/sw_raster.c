@@ -187,8 +187,11 @@ void pcswDrawTri(PcSwRaster *r, const PcVertex *v0, const PcVertex *v1,
         if (sz[i] > 1.f) sz[i] = 1.f;
     }
 
-    /* cull by signed area (back/front) */
-    area = (sx[1]-sx[0])*(sy[2]-sy[0]) - (sy[1]-sy[0])*(sx[2]-sx[0]);
+    /* cull by signed area. N64 framebuffer space has +Y pointing UP while
+     * the rasterizer's pixel grid has +Y pointing DOWN, which flips the
+     * sign of the screen-space cross product. Negate `area` so the
+     * front/back convention matches the GPU backends (CCW = front). */
+    area = -((sx[1]-sx[0])*(sy[2]-sy[0]) - (sy[1]-sy[0])*(sx[2]-sx[0]));
     if (area == 0.0f) return;
     if (st->cull_face == 2 && area < 0.0f) return; /* back */
     if (st->cull_face == 1 && area > 0.0f) return; /* front */

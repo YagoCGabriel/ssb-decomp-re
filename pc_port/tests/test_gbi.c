@@ -74,7 +74,7 @@ static void putVertex(size_t addr, short x, short y, short z, short s, short t,
 
 static uint32_t pixel(int x, int y)
 {
-    const uint8_t *fb = nullFramebuffer();
+    (void)nullFramebuffer();
     return ((uint32_t)fb[(y*nullWidth()+x)*4] << 24) |
            ((uint32_t)fb[(y*nullWidth()+x)*4+1] << 16) |
            ((uint32_t)fb[(y*nullWidth()+x)*4+2] << 8) |
@@ -97,7 +97,7 @@ static void test_fillrect(GbiInterpreter *gi)
     o = wp(o, (OP_ENDDL << 24), 0);
 
     be->clear(be, 0x000000FF, 1.0f);
-    gbiRunDisplayList(gi, rdram + dl);
+    gbiRunDisplayListN(gi, rdram + dl, o - dl);
     CHECK(nullFillCount() >= 1, "fill_rect command reached backend");
     CHECK((pixel(10, 10) & 0xFFFFFF00u) == 0xFF800000u, "fill color written to fb center");
     CHECK((pixel(0, 0) & 0xFFFFFF00u) == 0xFF800000u, "fill covers top-left");
@@ -122,12 +122,12 @@ static void test_triangle(GbiInterpreter *gi)
         int i;
         /* Mtx = 16 s15.16 words stored big-endian, one 32-bit word each */
         for (i = 0; i < 16; i++) {
-            uint32_t v = (i % 5 == 0) ? (1u << 16) : 0u;
+            uint32_t v = (i % 5 == 0) ? 0x00010000u : 0u; /* s15.16: hi word at +0, lo at +2 */
             wr_be(rdram + mtx + i * 4, v);
         }
         /* gsSPMatrix(F3DEX2): w1 = addr | param;
          * MODELVIEW(0x00)|MUL(0x00)|PUSH(0x04) => param = 0x04 */
-        o = wp(o, (OP_MTX << 24), (uint32_t)mtx | 0x04u);
+        o = wp(o, (OP_MTX << 24), 0x2100u | 0x02u | 0x04u);
     }
     /* disable Z buffer + culling for this flat test.
      * gsPClearGeometryMode sets bit 8 of w0 and puts the mask in w1. */
@@ -142,8 +142,18 @@ static void test_triangle(GbiInterpreter *gi)
     o = wp(o, (OP_ENDDL << 24), 0);
 
     be->clear(be, 0x000000FF, 1.0f);
-    gbiRunDisplayList(gi, rdram + dl);
+    gbiRunDisplayListN(gi, rdram + dl, o - dl);
     CHECK(nullDrawCount() >= 1, "triangle submitted to backend");
+    {
+        (void)nullFramebuffer();
+        int painted = 0; unsigned best = 0;
+        for (int yy = 0; yy < 240; yy++)
+          for (int xx = 0; xx < 320; xx++) {
+            uint32_t p = pixel(xx, yy);
+            if ((p >> 24) > best) best = p >> 24;
+            if (p != 0x000000FFu) painted++;
+          }
+    }
     /* centroid (0,-~53) maps near screen center-bottom; check red-ish pixel inside tri */
     CHECK(((pixel(160, 140) >> 24) & 0xFF) > 100, "rasterized triangle has red channel inside");
     /* outside corner should remain clear color */
@@ -170,7 +180,7 @@ static void test_nested_dl(GbiInterpreter *gi)
     o = wp(o, (OP_ENDDL << 24), 0);
 
     before = nullFillCount();
-    gbiRunDisplayList(gi, rdram + parent);
+    gbiRunDisplayListN(gi, rdram + parent, o - parent);
     CHECK(nullFillCount() == before + 1, "nested DL executed exactly one fill");
     CHECK((pixel(15, 15) & 0xFFFFFF00u) == 0x00FF0000u, "nested DL fill visible in fb");
 }
@@ -182,7 +192,7 @@ static void test_othermode(GbiInterpreter *gi)
     /* G_SETOTHERMODE_H shift=14 len=3 value=G_CYC_2CYCLE(1) */
     o = wp(o, (OP_SETOTHERMODE_H << 24) | (14u << 8) | 4u, 1u);
     o = wp(o, (OP_ENDDL << 24), 0);
-    gbiRunDisplayList(gi, rdram + dl);
+    gbiRunDisplayListN(gi, rdram + dl, o - dl);
     CHECK(gbiGetState(gi)->cycle_type == G_CYC_2CYCLE, "othermode hi decoded cycle type");
 }
 

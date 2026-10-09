@@ -41,6 +41,13 @@ static uint32_t be32(const uint8_t *p)
 #define GB_G_CULL_BACK  0x00000400u
 #define GB_G_LIGHTING   0x00020000u
 
+struct GbiVertex {
+    short ob[3];
+    unsigned short flag;
+    short tc[2];
+    unsigned char cn[4];
+};
+
 struct GbiInterpreter {
     PcBackend *backend;
     uint8_t *rdram;
@@ -49,12 +56,7 @@ struct GbiInterpreter {
     uint32_t segments[GBI_SEGMENTS];
 
     /* vertex buffer (gSPVertex writes here, triangles index into it) */
-    struct {
-        short ob[3];
-        unsigned short flag;
-        short tc[2];
-        unsigned char cn[4];
-    } verts[GBI_MAX_VERTS];
+    struct GbiVertex verts[GBI_MAX_VERTS];
     uint32_t nverts;
 
     /* tile state: per-tile dimensions recorded at load time */
@@ -67,6 +69,22 @@ struct GbiInterpreter {
     PcMatrix model_stack[GBI_MAX_STACK];
     int sp;
 
+    /* Display-list call stack (mirrors the RSP's DL address stack): each
+     * gSPDisplayList call pushes the resume point of its caller; ENDDL
+     * pops and resumes there. */
+    const uint8_t *call_stack[GBI_DL_DEPTH];
+    const uint8_t *dl_resume; /* where a child list should resume its parent */
+
+    /* Termination tracking: every gSPDisplayList call registers the address
+     * just past its last command in `dl_end`; when the walk reaches that word
+     * the parent list is exhausted (the real RSP halts on gsSPEndDisplayList
+     * and pops back to the caller's stream). This lets lists that omit an
+     * explicit ENDDL still terminate cleanly instead of hitting the
+     * runaway guard. dl_stop is set only for top-level invocations; nested
+     * calls inherit their parent's stop point. */
+    const uint8_t *dl_end;
+    const uint8_t *dl_stop;
+
     PcDrawState state;
     uint32_t fill_color_packed; /* gDPSetFillColor */
     int dl_depth;
@@ -78,6 +96,7 @@ struct GbiInterpreter {
     int half1_valid;       /* last_half1 holds an unconsumed payload */
     int pending4w;         /* waiting for the tail word of a split packet */
     uint32_t pend_w[4];    /* first three words of the pending packet */
+    int pend_half2_seen;   /* pending packet already consumed an RDPHALF_2 */
 };
 
 /* Big-endian load helpers: virtual RDRAM stores N64 data in BE order. */
@@ -112,6 +131,11 @@ void gbiSetSegment(GbiInterpreter *gi, int index, uint32_t base)
     if (index >= 0 && index < GBI_SEGMENTS) {
         gi->segments[index] = base;
     }
+}
+
+uint32_t gbiVertexCacheCount(GbiInterpreter *gi)
+{
+    return gi ? gi->nverts : 0;
 }
 
 const PcDrawState *gbiGetState(GbiInterpreter *gi)
@@ -182,9 +206,24 @@ GbiInterpreter *gbiCreate(PcBackend *backend, uint8_t *rdram, size_t rdram_size)
     gi->rdram_size = rdram_size;
     mat4Identity(&gi->model);
     mat4Identity(&gi->proj);
-    gi->state.depth_test = 1;
-    gi->state.depth_write = 1;
-    gi->state.cull_face = 2;
+    /* RSP reset state: geometry mode starts at 0 (no Z buffer, no culling),
+     * exactly like the hardware. Decoded flags must agree with geom_mode or
+     * refreshGeomDecoded() will never run before the first draw. */
+    gi->state.geom_mode = 0;
+    gi->state.depth_test = 0;
+    gi->state.depth_write = 0;
+    gi->state.lighting = 0;
+    gi->state.cull_face = 0;
+    /* full-screen scissor by default (matches RDP reset state); without
+     * this, triangles are clipped away when no gsDPSetScissor was issued */
+    gi->state.scissor[0] = 0.0f;
+    gi->state.scissor[1] = 0.0f;
+    gi->state.scissor[2] = 320.0f;
+    gi->state.scissor[3] = 240.0f;
+    /* default viewport: identity fb-space -> render target (null backend
+     * keeps native resolution until gSPViewport arrives) */
+    gi->state.viewport[0] = 1.0f; gi->state.viewport[1] = 0.0f;
+    gi->state.viewport[2] = 1.0f; gi->state.viewport[3] = 0.0f;
     if (backend && backend->bind_rdram) {
         backend->bind_rdram(backend, rdram, rdram_size);
     }
@@ -277,7 +316,7 @@ static void cmdVtx(GbiInterpreter *gi, const uint32_t *w)
          * [0..5]=ob xyz (s16) [6..7]=flag [8..11]=tc st (s16 fx10.2)
          * [12..15]=cn rgba (u8) */
         const uint8_t *v = src + i * 16;
-        typeof(gi->verts[0]) *d = &gi->verts[v0 + i];
+        struct GbiVertex *d = &gi->verts[v0 + i];
         d->ob[0] = (short)be16(v + 0);
         d->ob[1] = (short)be16(v + 2);
         d->ob[2] = (short)be16(v + 4);
@@ -304,7 +343,7 @@ static void emitTri(GbiInterpreter *gi, uint32_t a, uint32_t b, uint32_t c)
         return;
     }
     for (i = 0; i < 3; i++) {
-        const typeof(gi->verts[0]) *v = &gi->verts[idx[i]];
+        const struct GbiVertex *v = &gi->verts[idx[i]];
         transformVert(&gi->model, v->ob, pv[i].pos);
         pv[i].color[0] = v->cn[0] / 255.0f;
         pv[i].color[1] = v->cn[1] / 255.0f;
@@ -565,10 +604,31 @@ static void cmdSetScissor(GbiInterpreter *gi, const uint32_t *w)
 
 static void cmdFillRect(GbiInterpreter *gi, const uint32_t *w)
 {
+    /* gsDPFillRectangle is issued with integer pixel coordinates already
+     * shifted left by 5 into the 16.5 subpixel fields (see libultra's
+     * gDPPacketParam macro), so a full-screen rect uses xh=(W-1)<<16.
+     * Decode as fixed-point but tolerate both conventions: values below
+     * 2x the framebuffer extent are treated as plain integers (the form
+     * used by hand-written test lists). */
     float xl = (float)(w[1] >> 16) / 32.0f;
     float yl = (float)(w[1] & 0xFFFF) / 32.0f;
     float xh = (float)(w[2] >> 16) / 32.0f;
     float yh = (float)(w[2] & 0xFFFF) / 32.0f;
+    float fbw = 320.0f, fbh = 240.0f;
+    if (gi->backend && gi->backend->get_size) {
+        int bw = 0, bh = 0;
+        gi->backend->get_size(gi->backend, &bw, &bh);
+        if (bw > 0) fbw = (float)bw;
+        if (bh > 0) fbh = (float)bh;
+    }
+    /* heuristic: real N64 lists carry the <<5 subpixel shift, which pushes
+     * full-screen coordinates far beyond any plausible framebuffer size */
+    if (xh < fbw * 2.0f && yh < fbh * 2.0f) {
+        xl = (float)(w[1] >> 16);
+        yl = (float)(w[1] & 0xFFFF);
+        xh = (float)(w[2] >> 16);
+        yh = (float)(w[2] & 0xFFFF);
+    }
     if (gi->backend && gi->backend->fill_rect) {
         gi->backend->fill_rect(gi->backend, xl, yl, xh, yh, gi->fill_color_packed, &gi->state);
     }
@@ -588,15 +648,25 @@ static int runRdpPacket(GbiInterpreter *gi, const uint8_t *bytes)
     uint32_t w[4];
     uint8_t rdp;
 
-    w[0] = be32(bytes);
-    w[1] = be32(bytes + 4);
-    rdp = bytes[0];
-
-    if (rdp == OP_RDPHALF_1) {
-        gi->last_half1 = w[1];
+    /* RSP-side half-packet helpers routed here defensively: they must never
+     * reach the RDP dispatcher in normal flow (the main loop handles them),
+     * but if they do, treat them like the RSP path instead of falling into
+     * the generated-triangle default below. */
+    if (bytes[0] == OP_RDPHALF_1) {
+        gi->last_half1 = be32(bytes + 4);
         gi->half1_valid = 1;
         return 1;
     }
+    if (bytes[0] == OP_RDPHALF_2) {
+        gi->pend_w[2] = be32(bytes + 4);
+        gi->pend_half2_seen = 1;
+        if (!gi->pending4w) gi->pending4w = 1;
+        return 1;
+    }
+
+    w[0] = be32(bytes);
+    w[1] = be32(bytes + 4);
+    rdp = bytes[0];
 
     /* Commands whose semantics need the second half of the packet. In real
      * F3DEX2 lists the layout is [RDPHALF_1][CMD w0/w1][RDPHALF_2][tail];
@@ -614,17 +684,29 @@ static int runRdpPacket(GbiInterpreter *gi, const uint8_t *bytes)
     case RDP_SETKEYGB:
     case RDP_SETKEYR:
     case RDP_SETCONVERT: {
-        if (gi->half1_valid) {
-            /* classic F3DEX2 layout: HALF1 carried the high word; stash the
-             * first three words and wait for the tail command. */
+        if (rdp == RDP_LOADTLUT || rdp == RDP_LOADBLOCK) {
+            /* gsDPSetTileSize follows LOADTLUT/LOADBLOCK in the same macro,
+             * forming a 4-word packet whose tail is the NEXT list entry. */
             gi->pending4w = 1;
-            gi->pend_w[0] = w[0];           /* command header */
-            gi->pend_w[1] = w[1];           /* command low half */
-            gi->pend_w[2] = gi->last_half1; /* HALF1 stash (unused here) */
+            gi->pend_w[0] = w[0];
+            gi->pend_w[1] = w[1];
+            gi->pend_w[2] = gi->half1_valid ? gi->last_half1 : 0;
             gi->half1_valid = 0;
             return 1;
         }
-        /* adjacent packing (tests): bytes+8/+12 hold the continuation */
+        if (gi->half1_valid) {
+            /* classic F3DEX2 split layout [HALF1][CMD][HALF2][tail]: the
+             * payload rides as w[2]; the fourth word arrives with the tail
+             * command (handled by the pending4w path in the main loop). */
+            gi->pending4w = 1;
+            gi->pend_w[0] = w[0];
+            gi->pend_w[1] = w[1];
+            gi->pend_w[2] = gi->last_half1;
+            gi->half1_valid = 0;
+            return 1;
+        }
+        /* adjacent 4-word packing (synthetic lists/tests): the continuation
+         * sits inline at bytes+8..+15. Dispatch immediately. */
         w[2] = be32(bytes + 8);
         w[3] = be32(bytes + 12);
         break;
@@ -645,10 +727,14 @@ static int runRdpPacket(GbiInterpreter *gi, const uint8_t *bytes)
         gi->state.tex_width = ((w[0] >> 9) & 0x3FF) + 1;
         break;
     case RDP_SETZIMG:       break;
-    case RDP_SETTIMG:
-        gi->state.timg_addr = (uintptr_t)gbiResolveAddr(gi, w[1]);
+    case RDP_SETTIMG: {
+        uintptr_t off = (uintptr_t)gbiResolveAddr(gi, w[1]);
+        /* store the RDRAM byte offset (not the host pointer): backends use
+         * it to sample textures from their bound rdram view */
+        gi->state.timg_addr = gi->rdram ? (off - (uintptr_t)gi->rdram) : 0;
         pushTexture(gi);
         break;
+    }
     case RDP_SETCOMBINE:    cmdSetCombine(gi, w); break;
     case RDP_SETENVCOLOR:   cmdSetEnvColor(gi, w); break;
     case RDP_SETPRIMCOLOR:  cmdSetPrimColor(gi, w); break;
@@ -666,7 +752,13 @@ static int runRdpPacket(GbiInterpreter *gi, const uint8_t *bytes)
         gi->state.cycle_type = (int)((gi->state.othermode_hi >> G_MDSFT_CYCLETYPE) & 3);
         break;
     case RDP_SETPRIMDEPTH:  break;
-    case RDP_SETSCISSOR:    cmdSetScissor(gi, w); break;
+    case RDP_SETSCISSOR:
+        /* the adjacent-packing path may read past a 2-word test packet;
+         * only dispatch when the continuation words are in-bounds */
+        if (bytes + 16 <= gi->rdram + gi->rdram_size) {
+            cmdSetScissor(gi, w);
+        }
+        break;
     case RDP_SETCONVERT:    break;
     case RDP_SETKEYR:       break;
     case RDP_SETKEYGB:      break;
@@ -690,19 +782,68 @@ static int runRdpPacket(GbiInterpreter *gi, const uint8_t *bytes)
  * Main loop
  * ------------------------------------------------------------------------- */
 
-void gbiRunDisplayList(GbiInterpreter *gi, const void *dlptr)
+void gbiRunDisplayListN(GbiInterpreter *gi, const void *dlptr, size_t length_bytes)
 {
     const uint8_t *dlb = (const uint8_t *)dlptr;
     int guard = 0;
+    int is_top = (gi->dl_depth == 0);
 
     if (!dlb || gi->dl_depth >= GBI_DL_DEPTH) {
         return;
     }
+    /* Display lists must be 8-byte aligned inside virtual RDRAM; reject any
+     * out-of-bounds pointer up front so the walk can never read past it. */
+    if (dlb < gi->rdram || dlb >= gi->rdram + gi->rdram_size) {
+        pclog("gbi: DL pointer outside virtual RDRAM (%p)\n", (const void *)dlb);
+        return;
+    }
+    if (is_top) {
+        /* Bound the walk: explicit length wins; otherwise scan forward for
+         * this list's gsSPEndDisplayList and stop right after it, the way
+         * the real RSP halts at the end of the pushed display list. The
+         * scan only trusts an ENDDL that sits on an even 8-byte Gfx slot
+         * counting from the list start (odd-slot hits are vertex/data
+         * bytes whose first byte happens to equal 0xDF). */
+        const uint8_t *end;
+        if (length_bytes != 0) {
+            end = dlb + length_bytes;
+            if (end > gi->rdram + gi->rdram_size) {
+                end = gi->rdram + gi->rdram_size;
+            }
+            gi->dl_stop = end;
+        } else {
+            const uint8_t *p = dlb;
+            int slot = 0;
+            gi->dl_stop = gi->rdram + gi->rdram_size; /* fallback: whole buffer */
+            while (p + 8 <= gi->rdram + gi->rdram_size && slot < 4096) {
+                if ((slot & 1) == 0 && p[0] == OP_ENDDL) {
+                    gi->dl_stop = p + 8;
+                    break;
+                }
+                p += 8;
+                slot++;
+            }
+        }
+    } else {
+        /* nested call: remember where to resume in the caller's stream when
+         * the child hits ENDDL (mirrors the RSP's DL address stack) */
+        gi->call_stack[gi->dl_depth] = gi->dl_resume;
+    }
     gi->dl_depth++;
+    gi->dl_resume = NULL;
 
     while (guard++ < 200000) {
         uint32_t w[4];
         uint8_t op;
+
+        if (is_top && gi->dl_stop && dlb >= gi->dl_stop) {
+            goto done; /* top-level stream exhausted without an explicit ENDDL */
+        }
+        /* A nested call that ended without ENDDL (e.g. its final packet was
+         * a branch or it ran out of bounds): resume the parent stream. */
+        if (!is_top && gi->dl_resume && dlb >= gi->dl_resume) {
+            goto done;
+        }
 
         /* Every display-list command occupies 8 bytes. Gfx words are stored
          * big-endian in virtual RDRAM (N64 byte order); decode with be32()
@@ -712,31 +853,76 @@ void gbiRunDisplayList(GbiInterpreter *gi, const void *dlptr)
         w[1] = be32(dlb + 4);
 
         if (gi->pending4w) {
-            /* This command is the tail word of a multi-word RDP packet whose
-             * first half was already dispatched by runRdpPacket. */
-            uint32_t pw[4];
-            pw[0] = gi->pend_w[0];          /* command header word */
-            pw[1] = gi->pend_w[1];          /* low half from the command */
-            pw[2] = w[1];                   /* high half from RDPHALF_2 */
-            pw[3] = 0;
-            gi->pending4w = 0;
-            /* Re-enter the DP dispatcher with the assembled 4-word packet. */
-            switch ((uint8_t)(pw[0] >> 24)) {
-            case RDP_SETCOMBINE:  cmdSetCombine(gi, pw); break;
-            case RDP_SETSCISSOR:  cmdSetScissor(gi, pw); break;
-            case RDP_FILLRECT:    cmdFillRect(gi, pw); break;
-            case RDP_LOADBLOCK:   cmdLoadBlock(gi, pw); break;
-            case RDP_LOADTILE:    cmdLoadTile(gi, pw); break;
-            case RDP_SETTILESIZE: cmdSetTileSize(gi, pw); break;
-            case RDP_LOADTLUT:    cmdLoadTlut(gi, pw); break;
-            default:              break;
+            /* Tail of a multi-word RDP packet. Two real-F3DEX2 shapes reach
+             * this point:
+             *  - [HALF1][CMD][HALF2][tail]: the current command is RDPHALF_2
+             *    and its w1 is the packet's third word; the fourth word is
+             *    the NEXT list entry. Consume HALF2, stay pending.
+             *  - [HALF1][CMD][tail] (or LOADTLUT/LOADBLOCK followed directly
+             *    by their SET_TILESIZE tail): the current command's w1 is
+             *    the final word; dispatch now. */
+            if (op == OP_RDPHALF_2) {
+                gi->pend_w[2] = w[1];
+                dlb += 8;
+                continue;
+            }
+            {
+                uint32_t pw[4];
+                int dispatch_now = 1;
+                pw[0] = gi->pend_w[0];      /* command header word */
+                pw[1] = gi->pend_w[1];      /* low half from the command */
+                if (gi->pend_half2_seen) {
+                    /* [HALF1][CMD][HALF2][tail]: the tail command's w0 is a
+                     * real GBI header, not packet data. */
+                    pw[2] = 0;
+                } else {
+                    /* adjacent packing: the stashed HALF2 slot holds this
+                     * entry's own w0 as the packet's third word */
+                    pw[2] = w[0];
+                    /* LOADTLUT/LOADBLOCK complete in three words: their
+                     * trailing SETTILESIZE is an independent command and
+                     * must be re-dispatched normally afterwards. */
+                    if ((uint8_t)(pw[0] >> 24) == RDP_LOADTLUT ||
+                        (uint8_t)(pw[0] >> 24) == RDP_LOADBLOCK) {
+                        dispatch_now = 0;
+                    }
+                }
+                if (dispatch_now) {
+                    pw[3] = w[1];           /* tail word (this entry's w1) */
+                    gi->pending4w = 0;
+                    gi->pend_half2_seen = 0;
+                    switch ((uint8_t)(pw[0] >> 24)) {
+                    case RDP_SETCOMBINE:  cmdSetCombine(gi, pw); break;
+                    case RDP_SETSCISSOR:  cmdSetScissor(gi, pw); break;
+                    case RDP_FILLRECT:    cmdFillRect(gi, pw); break;
+                    case RDP_LOADBLOCK:   cmdLoadBlock(gi, pw); break;
+                    case RDP_LOADTILE:    cmdLoadTile(gi, pw); break;
+                    case RDP_SETTILESIZE: cmdSetTileSize(gi, pw); break;
+                    case RDP_LOADTLUT:    cmdLoadTlut(gi, pw); break;
+                    default:              break;
+                    }
+                    dlb += 8;
+                    continue;
+                }
+                /* LOADTLUT/LOADBLOCK: dispatch with the words we have, then
+                 * fall through to normal handling of the tail command. */
+                gi->pending4w = 0;
+                gi->pend_half2_seen = 0;
+                switch ((uint8_t)(pw[0] >> 24)) {
+                case RDP_LOADBLOCK:   cmdLoadBlock(gi, pw); break;
+                case RDP_LOADTLUT:    cmdLoadTlut(gi, pw); break;
+                default:              break;
+                }
             }
             dlb += 8;
             continue;
         }
 
-        if (op <= 0x0F || op == OP_SETOTHERMODE_H || op == OP_SETOTHERMODE_L ||
-            op == OP_SPNOOP || op == OP_RDPHALF_1 || op == OP_RDPHALF_2) {
+        if (op <= 0x0F || (op >= 0xD3 && op <= 0xE3) || op == OP_RDPHALF_1 ||
+            op == OP_RDPHALF_2) {
+            /* OP_RDPHALF_1 is F3DEX2's 0xB4 (gsSPHalf1); it lives outside the
+             * 0xD3..0xE3 window and must be whitelisted explicitly or split
+             * packets (ParseView/SetScissor/FillRect payloads) are dropped. */
             /* ---- RSP commands: microcode ops 0x00..0x0F plus the F3DEX2
              * high-window members SPNOOP(0xE0)/RDPHALF_1(0xE1)/
              * SETOTHERMODE_L(0xE2)/SETOTHERMODE_H(0xE3)/RDPHALF_2(0xF1).
@@ -764,6 +950,9 @@ void gbiRunDisplayList(GbiInterpreter *gi, const void *dlptr)
             dlb += 8;
             break;
         case OP_TRI2: {
+            if (dlb + 16 > gi->rdram + gi->rdram_size) {
+                goto done; /* malformed/truncated list */
+            }
             w[2] = be32(dlb + 8);
             w[3] = be32(dlb + 12);
             cmdTri2(gi, w);
@@ -788,21 +977,33 @@ void gbiRunDisplayList(GbiInterpreter *gi, const void *dlptr)
             /* third word of a split packet; the fourth follows as the next
              * command in the list (handled by the pending4w path above) */
             gi->pend_w[2] = w[1];
+            gi->pend_half2_seen = 1;
             dlb += 8;
             break;
         case OP_ENDDL:
+            /* gsSPEndDisplayList pops the RSP display-list stack. In this
+             * recursive interpreter each call frame owns one list, so ENDDL
+             * always returns from the current invocation; the caller (the
+             * OP_DL handler or gbiRunDisplayList's external caller) resumes
+             * its own stream right after the call site. */
             goto done;
         case OP_DL: {
             /* mode bit 0 of w1: 0 = call (push), 1 = branch/jump */
             uint32_t target = w[1] & 0xFFFFFFF0u;
             if (w[1] & 1) {
-                dlb = (const uint8_t *)gbiResolveAddr(gi, target);
-                if (!dlb) goto done;
+                const uint8_t *tgt = (const uint8_t *)gbiResolveAddr(gi, target);
+                if (!tgt) goto done;
+                /* Branch replaces the current stream: continue walking from
+                 * the target inside this frame (no push). */
+                dlb = tgt;
                 continue;
             } else {
                 const void *child = gbiResolveAddr(gi, target);
+                if (!child) goto done;
+                /* child's ENDDL pops back to the word after this command */
+                gi->dl_resume = dlb + 8;
+                gbiRunDisplayListN(gi, child, 0);
                 dlb += 8;
-                gbiRunDisplayList(gi, child);
             }
             break;
         }
@@ -810,11 +1011,25 @@ void gbiRunDisplayList(GbiInterpreter *gi, const void *dlptr)
         case OP_MOVEMEM:
             dlb += 16;
             break;
-        case OP_MOVEWORD:
-            /* gSPViewport encodes its payload via MoveWord into RSP dmem;
-             * the port supplies viewports through the backend directly. */
+        case OP_MOVEWORD: {
+            /* gSPViewport is encoded as a MoveWord into RSP dmem with the
+             * G_VP_VIEWPORT selector (0x0104). The Vp struct lives in
+             * main RAM at w[1]: two Vs (lower-left and upper-right), each
+             * 8 bytes of s16 fields: ob[2] (fb pixel coords) + h.vscale[2]. */
+            uint32_t selector = w[0] & 0xFFFFu;
+            if (selector == 0x0104u && gi->backend && gi->backend->set_viewport) {
+                const uint8_t *vp = (const uint8_t *)gbiResolveAddr(gi, w[1]);
+                if (vp) {
+                    float lx = (float)be16(vp + 0);
+                    float ly = (float)be16(vp + 2);
+                    float sx = (float)be16(vp + 8);   /* vscale x (upper-right V) */
+                    float sy = (float)be16(vp + 10);  /* vscale y */
+                    gi->backend->set_viewport(gi->backend, lx, ly, sx, sy);
+                }
+            }
             dlb += 8;
             break;
+        }
         case OP_MTX:
             cmdMatrix(gi, w);
             dlb += 8;
@@ -832,8 +1047,9 @@ void gbiRunDisplayList(GbiInterpreter *gi, const void *dlptr)
             dlb += 8;
             break;
         case OP_TEXTURE:
+            /* gsSPTexture is a single Gfx (8 bytes) in F3DEX2 */
             cmdTexture(gi, w);
-            dlb += 16;
+            dlb += 8;
             break;
         case OP_DMA_IO:
             /* gSPSegment: io field (bits 8..11) = segment index */
@@ -861,4 +1077,15 @@ void gbiRunDisplayList(GbiInterpreter *gi, const void *dlptr)
     pclog("gbi: DL runaway guard hit\n");
 done:
     gi->dl_depth--;
+    if (is_top) {
+        gi->dl_stop = NULL;
+    } else {
+        /* pop the caller's resume point so grandparent frames keep theirs */
+        gi->dl_resume = gi->call_stack[gi->dl_depth];
+    }
+}
+
+void gbiRunDisplayList(GbiInterpreter *gi, const void *dlptr)
+{
+    gbiRunDisplayListN(gi, dlptr, 0);
 }

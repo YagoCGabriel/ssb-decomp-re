@@ -239,6 +239,8 @@ typedef struct PcBackend {
     void (*fill_rect)(struct PcBackend *self, float x0, float y0, float x1, float y1,
                       uint32_t color, const struct PcDrawState *state);
     void (*clear)(struct PcBackend *self, uint32_t color, float depth);
+    /* current render-target size in pixels (0 if not initialized) */
+    void (*get_size)(struct PcBackend *self, int *w, int *h);
 } PcBackend;
 
 struct PcTexInfo {
@@ -259,8 +261,12 @@ GbiInterpreter *gbiCreate(PcBackend *backend, uint8_t *rdram, size_t rdram_size)
 void            gbiDestroy(GbiInterpreter *gi);
 
 /* Execute one display list (recurses into gSPDisplayList children, follows
- * branches/joins). `dl` points into the virtual RDRAM buffer. */
+ * branches/joins). `dl` points into the virtual RDRAM buffer. The list is
+ * walked until gsSPEndDisplayList or `length_bytes` have been consumed,
+ * whichever comes first; length_bytes = 0 means "unbounded scan" (stop at
+ * the first ENDDL found in the buffer). */
 void gbiRunDisplayList(GbiInterpreter *gi, const void *dl);
+void gbiRunDisplayListN(GbiInterpreter *gi, const void *dl, size_t length_bytes);
 
 /* Set the segment table base (as written by gSPSegment). */
 void gbiSetSegment(GbiInterpreter *gi, int index, uint32_t base);
@@ -277,3 +283,6 @@ PcBackend *gbiGetBackend(GbiInterpreter *gi);
 #endif
 
 #endif /* GBI_INTERPRETER_H */
+
+/* Debug/test accessor: number of vertices currently held in the RSP vertex cache. */
+uint32_t gbiVertexCacheCount(GbiInterpreter *gi);

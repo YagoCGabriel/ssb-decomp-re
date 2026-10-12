@@ -59,22 +59,35 @@ static size_t rdp4(size_t off, uint32_t w0, uint32_t w1, uint32_t w2, uint32_t w
     return off + 16;
 }
 
+static void put16(uint8_t *dst, int val)
+{
+    dst[0] = (uint8_t)(((short)val >> 8) & 0xFF);
+    dst[1] = (uint8_t)((short)val & 0xFF);
+}
+
 static void putVertex(size_t addr, short x, short y, short z, short s, short t,
                       unsigned char r, unsigned char g, unsigned char b, unsigned char a)
 {
     uint8_t *v = rdram + addr;
-    wr_be(v + 0, (uint32_t)(uint16_t)x);
-    wr_be(v + 2, (uint32_t)(uint16_t)y);
-    wr_be(v + 4, (uint32_t)(uint16_t)z);
-    wr_be(v + 6, 0);
-    wr_be(v + 8, (uint32_t)(uint16_t)s);
-    wr_be(v + 10, (uint32_t)(uint16_t)t);
+    /* Vtx fields are s16 big-endian in RDRAM (matches cmdVtx's be16 decode) */
+    put16(v + 0, x);
+    put16(v + 2, y);
+    put16(v + 4, z);
+    put16(v + 6, 0);
+    put16(v + 8, s);
+    put16(v + 10, t);
     v[12] = r; v[13] = g; v[14] = b; v[15] = a;
 }
 
+static const uint8_t *fb;
+
 static uint32_t pixel(int x, int y)
 {
-    (void)nullFramebuffer();
+    /* always re-fetch: the null backend reallocates its fb on every init */
+    const uint8_t *cur = nullFramebuffer();
+    if (cur != fb) {
+        fb = cur;
+    }
     return ((uint32_t)fb[(y*nullWidth()+x)*4] << 24) |
            ((uint32_t)fb[(y*nullWidth()+x)*4+1] << 16) |
            ((uint32_t)fb[(y*nullWidth()+x)*4+2] << 8) |

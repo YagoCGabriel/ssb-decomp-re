@@ -1,40 +1,26 @@
 #ifndef PC_WIN32_SHIM_H
 #define PC_WIN32_SHIM_H
-
 /*
- * ssb-decomp PC Port - Win32 API shim.
+ * ssb-decomp PC Port - minimal Win32/Direct3D type shim.
  *
- * Lets the Direct3D 9-ex-based D3D10/D3D11 backend sources compile and be
- * syntax-checked on non-Windows hosts (CI), while compiling natively against
- * the real Windows SDK headers when built on MSVC/MinGW-w64.
- * On Windows this header simply includes <windows.h>/<d3d11.h>/<d3d10.h>.
+ * Lets the D3D10/D3D11 backend translation units compile on non-Windows CI
+ * hosts (type-check only). On Windows with the Platform SDK available, define
+ * PCPORT_USE_REAL_WINDOWS before including to pull in the real headers.
  */
-
-#if defined(_WIN32)
-
+#if defined(PCPORT_USE_REAL_WINDOWS) && defined(_WIN32)
 #include <windows.h>
 #include <d3d11.h>
 #include <d3d10.h>
-#include <dxgi.h>
-
-#else /* portable stubs ---------------------------------------------------*/
-
-#include <stdint.h>
-
-typedef void *HWND, *HINSTANCE, *HDC;
-typedef unsigned long DWORD;
+#else
+typedef void *HWND;
+typedef void *HINSTANCE;
+typedef unsigned int UINT;
+typedef long LPARAM;
+typedef long WPARAM;
+typedef long LRESULT;
 typedef int BOOL;
-typedef uint64_t UINT64_;
-typedef union LARGE_INTEGER { uint64_t QuadPart; struct { uint32_t LowPart; int32_t HighPart; } u; } LARGE_INTEGER;
-
-typedef struct RECT_ { long left, top, right, bottom; } RECT_;
-typedef struct POINT_ { long x, y; } POINT_;
-
-#define TRUE_ 1
-#define FALSE_ 0
-
-static inline void QueryPerformanceFrequency_(LARGE_INTEGER *f) { f->QuadPart = 10000000ull; }
-static inline void QueryPerformanceCounter_(LARGE_INTEGER *c) { c->QuadPart = 0; }
-
-#endif /* _WIN32 */
+typedef unsigned char uint8_t_shim_guard;
+#define TRUE 1
+#define FALSE 0
+#endif
 #endif /* PC_WIN32_SHIM_H */

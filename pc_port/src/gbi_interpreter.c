@@ -920,9 +920,12 @@ void gbiRunDisplayListN(GbiInterpreter *gi, const void *dlptr, size_t length_byt
 
         if (op <= 0x0F || (op >= 0xD3 && op <= 0xE3) || op == OP_RDPHALF_1 ||
             op == OP_RDPHALF_2) {
-            /* OP_RDPHALF_1 is F3DEX2's 0xB4 (gsSPHalf1); it lives outside the
-             * 0xD3..0xE3 window and must be whitelisted explicitly or split
-             * packets (ParseView/SetScissor/FillRect payloads) are dropped. */
+            /* Explicit RSP whitelist: 0x00-0x0F, the contiguous F3DEX2 high
+             * window 0xD3-0xE3 (SPECIAL_3 .. SETOTHERMODE_H), plus the two
+             * split-packet markers 0xB4/0xF1. Everything else in 0xC8-0xFF
+             * (generated TRI1/TRI2 edge/shade/tex/z packets 0xC8-0xCF and
+             * pure-DP commands 0xEA-0xFF except those inside the window)
+             * falls through to the RDP dispatcher below. */
             /* ---- RSP commands: microcode ops 0x00..0x0F plus the F3DEX2
              * high-window members SPNOOP(0xE0)/RDPHALF_1(0xE1)/
              * SETOTHERMODE_L(0xE2)/SETOTHERMODE_H(0xE3)/RDPHALF_2(0xF1).
@@ -1015,15 +1018,22 @@ void gbiRunDisplayListN(GbiInterpreter *gi, const void *dlptr, size_t length_byt
             /* gSPViewport is encoded as a MoveWord into RSP dmem with the
              * G_VP_VIEWPORT selector (0x0104). The Vp struct lives in
              * main RAM at w[1]: two Vs (lower-left and upper-right), each
-             * 8 bytes of s16 fields: ob[2] (fb pixel coords) + h.vscale[2]. */
+             * 8 bytes of s16 fields: ob[2] (fb pixel coords) + h.vscale[2].
+             * Real libultra encodes vscale as fixed-point 2.16 (e.g.
+             * _GViSetViewport uses 65536 == 1.0 for 1:1 mapping), so we
+             * divide by 65536.0f to get native-pixel scales. */
             uint32_t selector = w[0] & 0xFFFFu;
             if (selector == 0x0104u && gi->backend && gi->backend->set_viewport) {
                 const uint8_t *vp = (const uint8_t *)gbiResolveAddr(gi, w[1]);
                 if (vp) {
                     float lx = (float)be16(vp + 0);
                     float ly = (float)be16(vp + 2);
-                    float sx = (float)be16(vp + 8);   /* vscale x (upper-right V) */
-                    float sy = (float)be16(vp + 10);  /* vscale y */
+                    /* vscale is stored as a u16 fixed-point 2.16 value (65536 == 1.0);
+         * reading it unsigned avoids turning the common 1.0 scale into -1 */
+                    float sx = (float)be16(vp + 8) / 65536.0f;
+                    float sy = (float)be16(vp + 10) / 65536.0f;
+                    gi->state.viewport[0] = sx; gi->state.viewport[1] = lx;
+                    gi->state.viewport[2] = sy; gi->state.viewport[3] = ly;
                     gi->backend->set_viewport(gi->backend, lx, ly, sx, sy);
                 }
             }

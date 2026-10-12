@@ -1,6 +1,2 @@
-# Build artifacts
-*.o
-build/
-
-# Test output artifacts
+pc_port/build/
 *.rgba

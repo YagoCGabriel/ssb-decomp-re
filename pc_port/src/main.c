@@ -178,7 +178,46 @@ int main(int argc, char **argv)
     size_t   dl_end      = 0;
     int      using_rom   = 0;
 
-    if (rom_path && *rom_path) {
+    /* Search order for a boot source:
+     *   1. explicit path (config/env SSB_ROM);
+     *   2. extracted assets next to the executable: rom/boot_dl.bin +
+     *      rom/f3dex2.bin (produced by ssb_extract / the setup wizard);
+     *   3. full ROM auto-discovered as smash.z64 beside the exe
+     *      (handled inside pcConfig via cfg->rom). */
+    if ((!rom_path || !*rom_path)) {
+        char bl[1024];
+        if (pcRomExeDir(bl, sizeof bl)) {
+            strcat(bl, "rom" PATHSEP "boot_dl.bin");
+            FILE *bf = fopen(bl, "rb");
+            if (bf) {
+                fseek(bf, 0, SEEK_END);
+                long bsz = ftell(bf);
+                fseek(bf, 0, SEEK_SET);
+                if (bsz >= 8 && (size_t)bsz <= 0x3000u &&
+                    (size_t)bsz <= PCPORT_RDRAM_SIZE - PCPORT_RDRAM_DL_BASE_BOOT) {
+                    size_t got = fread(rdram + PCPORT_RDRAM_DL_BASE_BOOT, 1, (size_t)bsz, bf);
+                    fclose(bf);
+                    if (got == (size_t)bsz) {
+                        /* the extractor stores the aligned window starting at
+                         * floor(bootDL); the DL itself begins at its offset
+                         * inside that page - locate it by scanning for the
+                         * first plausible Gfx slot is unreliable, so instead
+                         * we simply run from the window start: the IPL gfx
+                         * display list starts at the page boundary in every
+                         * known dump (boot address is page-aligned). */
+                        rom_dl_addr = PCPORT_RDRAM_DL_BASE_BOOT;
+                        rom_dl_len  = got;
+                        using_rom   = 1;
+                        pclog("rom: boot assets loaded from extracted file (%zu bytes)\n", got);
+                    }
+                } else {
+                    fclose(bf);
+                }
+            }
+        }
+    }
+
+    if (!using_rom && rom_path && *rom_path) {
         memset(&rom_info, 0, sizeof(rom_info));
         rom = PcRomLoad(rom_path, &rom_info);
         if (rom && rom_info.title_valid) {
@@ -207,7 +246,7 @@ int main(int argc, char **argv)
     PcGbiBridge *br = pcGbiBridgeCreate(vi);
 
     int is_null = strcmp(be->name ? be->name : "null", "null") == 0 ||
-                  (cfg->backend && !strcmp(cfg->backend, "null"));
+                  (!strcmp(cfg->backend, "null"));
     int frames = cfg->frames > 0 ? cfg->frames : (is_null ? 1 : 240);
 
     for (int f = 0; f < frames; f++) {

@@ -2,12 +2,54 @@
  * ssb-decomp PC Port - ROM loader / asset integrator (stage 5).
  * See pc_rom.h for the integration contract.
  */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "pc_rom.h"
 #include "pc_port_common.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(_WIN32) || defined(PCPORT_USE_WIN32)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#else
+#  ifndef _POSIX_C_SOURCE
+#    define _POSIX_C_SOURCE 200809L
+#  endif
+#  ifndef _DEFAULT_SOURCE
+#    define _DEFAULT_SOURCE
+#  endif
+#  include <unistd.h>
+#endif
+
+int pcRomExeDir(char *out, size_t cap)
+{
+    if (!out || cap < 2) return 0;
+    out[0] = '\0';
+#if defined(_WIN32) || defined(PCPORT_USE_WIN32)
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, buf, sizeof buf);
+    if (n == 0 || n >= sizeof buf) return 0;
+    char *slash = strrchr(buf, '\\');
+    if (!slash) return 0;
+    slash[1] = '\0';
+    snprintf(out, cap, "%s", buf);
+    return 1;
+#else
+    ssize_t r = readlink("/proc/self/exe", out, cap - 2);
+    if (r <= 0) return 0;
+    out[r] = '\0';
+    char *slash = strrchr(out, '/');
+    if (!slash) { out[0] = '\0'; return 0; }
+    slash[1] = '\0';
+    return 1;
+#endif
+}
 
 /* The PI_BSD_DOM1_PID checksum table used by the game itself lives in
  * src/sys/dma.c. The US dump (smashbrothers.us.yaml: sha1 e2929e10...) has

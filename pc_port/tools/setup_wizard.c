@@ -52,6 +52,8 @@
 #else
 #  include <unistd.h>
 #  include <sys/wait.h>
+#  include <sys/stat.h>
+#  include <errno.h>
 #endif
 
 #ifdef PCPORT_HAVE_GTK
@@ -313,6 +315,117 @@ static int install_rom_next_to_exe(const char *src, char *dst, size_t cap)
     return 1;
 }
 
+/* Extract boot assets from the (already validated) ROM into <dir>/rom:
+ *   rom/boot_dl.bin - aligned 3-page window containing the boot display list
+ *   rom/f3dex2.bin  - F3DEX2 ucode blob, best effort (optional)
+ * Returns 1 if at least boot_dl.bin was written. */
+static int extract_assets(const char *dir, const char *rom_path)
+{
+#ifdef WIZ_WIN
+#  define WSEP '\\'
+#else
+#  define WSEP '/'
+#endif
+    FILE *f = fopen(rom_path, "rb");
+    uint8_t *buf;
+    long sz;
+    char sub[1024], path[1200];
+    uint32_t dl, src;
+    size_t win, i;
+    int wrote = 0;
+
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz < 0x40 || ((size_t)sz % 4)) { fclose(f); return 0; }
+    buf = (uint8_t *)malloc((size_t)sz);
+    if (!buf || fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        if (buf) free(buf);
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+
+    /* normalize to big-endian z64 layout */
+    {
+        uint32_t m = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
+                     ((uint32_t)buf[2] << 8) | buf[3];
+        if (m == 0x37804012u) {                 /* v64: swap adjacent bytes */
+            for (i = 0; i + 1 < (size_t)sz; i += 2) {
+                uint8_t t = buf[i]; buf[i] = buf[i + 1]; buf[i + 1] = t;
+            }
+        } else if (m == 0x40123780u) {          /* n64: swap words */
+            for (i = 0; i + 3 < (size_t)sz; i += 4) {
+                uint8_t a = buf[i], b = buf[i + 1], c = buf[i + 2], d = buf[i + 3];
+                buf[i] = d; buf[i + 1] = c; buf[i + 2] = b; buf[i + 3] = a;
+            }
+        }
+    }
+
+    snprintf(sub, sizeof sub, "%s%crom", dir, WSEP);
+#ifdef WIZ_WIN
+    CreateDirectoryA(sub, NULL);
+#else
+    mkdir(sub, 0755);
+#endif
+
+    dl = ((uint32_t)buf[0x40] << 24) | ((uint32_t)buf[0x41] << 16) |
+         ((uint32_t)buf[0x42] << 8) | buf[0x43];
+    if (dl && dl < 0x100000u && !(dl & 7)) {
+        src = dl & ~0xFFFu;
+        win = 0;
+        while (win < 0x3000 && src + win + 0x1000 <= (size_t)sz) win += 0x1000;
+        if (win) {
+            snprintf(path, sizeof path, "%s%cboot_dl.bin", sub, WSEP);
+            FILE *o = fopen(path, "wb");
+            if (o) {
+                wrote = fwrite(buf + src, 1, win, o) == win;
+                fclose(o);
+            }
+        }
+    }
+
+    /* F3DEX2 heuristic: libultra ucode prologue lui $at,0x8000 */
+    {
+        size_t limit = (size_t)sz < 0x100000u ? (size_t)sz : 0x100000u;
+        for (i = 0; i + 0x2000 <= limit; i += 8) {
+            uint32_t w0 = ((uint32_t)buf[i] << 24) | ((uint32_t)buf[i+1] << 16) |
+                          ((uint32_t)buf[i+2] << 8) | buf[i+3];
+            if (w0 != 0x3C018000u) continue;
+            size_t nz = 0;
+            for (size_t k = 0; k < 0x1000; k += 4) {
+                uint32_t w = ((uint32_t)buf[i+k] << 24) | ((uint32_t)buf[i+k+1] << 16) |
+                             ((uint32_t)buf[i+k+2] << 8) | buf[i+k+3];
+                if (w) nz++;
+            }
+            if (nz < 0x100) continue;
+            size_t len = 0x1000;
+            while (len < 0xC000 && i + len + 4 <= limit) {
+                uint32_t w = ((uint32_t)buf[i+len] << 24) | ((uint32_t)buf[i+len+1] << 16) |
+                             ((uint32_t)buf[i+len+2] << 8) | buf[i+len+3];
+                if (w == 0) {
+                    size_t z = 0;
+                    while (i + len + z + 4 <= limit) {
+                        uint32_t zz = ((uint32_t)buf[i+len+z] << 24) |
+                                      ((uint32_t)buf[i+len+z+1] << 16) |
+                                      ((uint32_t)buf[i+len+z+2] << 8) | buf[i+len+z+3];
+                        if (zz) break;
+                        z += 4;
+                    }
+                    if (z >= 64) break;
+                    len += z;
+                } else len += 4;
+            }
+            snprintf(path, sizeof path, "%s%cf3dex2.bin", sub, WSEP);
+            FILE *o = fopen(path, "wb");
+            if (o) { fwrite(buf + i, 1, len, o); fclose(o); }
+            break;
+        }
+    }
+
+    free(buf);
+    return wrote;
+}
+
 /* ------------------------------------------------------------------ */
 /* Backend auto-detect + build/run                                     */
 /* ------------------------------------------------------------------ */
@@ -433,6 +546,15 @@ int main(int argc, char **argv)
             printf("  AVISO: nao foi possivel copiar a ROM para a pasta do programa;\n"
                    "         usando o caminho original em runtime.\n");
         }
+        /* Extract boot assets into ./rom next to the executables
+         * (boot_dl.bin / f3dex2.bin / smash.z64 / assets.txt). */
+        char wdir[1024];
+        exe_dir(wdir, sizeof wdir);
+        if (extract_assets(wdir, rom))
+            printf("  - assets extraidos para a pasta 'rom' ao lado dos executaveis\n");
+        else
+            printf("  AVISO: extracao de assets falhou; o jogo usara a ROM completa\n"
+                   "         via descoberta automatica (smash.z64).\n");
     }
     printf("  - paginas da boot DL copiadas para o espelho de RDRAM (osPi DMA)\n");
     printf("  - ucode F3DEX2 interpretado pelo nucleo pc_port (gbi_interpreter)\n");

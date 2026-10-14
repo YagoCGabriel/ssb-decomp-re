@@ -154,13 +154,20 @@ static void discover_local_rom(PcConfig *c) {
     *slash = '\0'; /* dir of the executable */
     for (i = 0; names[i]; i++) {
         char p[MAX_PATH * 2];
-        snprintf(p, sizeof p, "%s\\%s", exe, names[i]);
+        snprintf(p, sizeof p, "%s\\rom\\%s", exe, names[i]);
         FILE *f = fopen(p, "rb");
+        if (f) { fclose(f); set_str(c->rom, sizeof c->rom, p); return; }
+        snprintf(p, sizeof p, "%s\\%s", exe, names[i]);
+        f = fopen(p, "rb");
         if (f) { fclose(f); set_str(c->rom, sizeof c->rom, p); return; }
     }
 #else
     for (i = 0; names[i]; i++) {
-        FILE *f = fopen(names[i], "rb");
+        char p[512];
+        snprintf(p, sizeof p, "rom/%s", names[i]);
+        FILE *f = fopen(p, "rb");
+        if (f) { fclose(f); set_str(c->rom, sizeof c->rom, p); return; }
+        f = fopen(names[i], "rb");
         if (f) { fclose(f); set_str(c->rom, sizeof c->rom, names[i]); return; }
     }
 #endif

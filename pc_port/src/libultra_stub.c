@@ -19,6 +19,8 @@
 #include <string.h>
 #include <stdint.h>
 
+#include "pc_config.h"
+
 #include "pc_libultra.h"
 #include "pc_port_common.h"
 #include "gbi_interpreter.h"
@@ -115,8 +117,12 @@ void pcGbiBridgeDestroy(PcGbiBridge *br)
 uint32_t pcContRead(int port)
 {
     if (port != 0) return 0xFFFFFFFFu; /* disconnected */
-    const char *sim = getenv("SSB_SIM_BTN");
-    return sim ? (uint32_t)strtoul(sim, NULL, 0) : 0u;
+    uint32_t sim = pcConfig()->sim_buttons;      /* launcher/config override */
+    if (!sim) {
+        const char *env = getenv("SSB_SIM_BTN"); /* legacy env path */
+        if (env) sim = (uint32_t)strtoul(env, NULL, 0);
+    }
+    return sim;
 }
 
 int16_t pcContStickX(int port) { (void)port; return 0; }

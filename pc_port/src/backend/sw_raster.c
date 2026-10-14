@@ -14,6 +14,7 @@ void pcswInit(PcSwRaster *r, uint8_t *fb, float *zbuf, int w, int h)
     r->zbuf = zbuf;
     r->width = w;
     r->height = h;
+    r->prim_depth = 0.0f; /* N64 reset state: fills write z=0 (nearest) */
 }
 
 void pcswClear(PcSwRaster *r, uint32_t rgba, float depth)
@@ -31,6 +32,15 @@ void pcswClear(PcSwRaster *r, uint32_t rgba, float depth)
     }
 }
 
+void pcswSetPrimDepth(PcSwRaster *r, uint32_t z16)
+{
+    /* N64 primitive depth is s15 fixed point; map to the 0..1 raster range. */
+    float z = (float)(int16_t)z16 / 32767.0f;
+    if (z < 0.0f) z = 0.0f;
+    if (z > 1.0f) z = 1.0f;
+    r->prim_depth = z;
+}
+
 void pcswFillRect(PcSwRaster *r, float x0, float y0, float x1, float y1, uint32_t rgba)
 {
     int ix0 = (int)x0, iy0 = (int)y0, ix1 = (int)x1, iy1 = (int)y1;
@@ -46,6 +56,7 @@ void pcswFillRect(PcSwRaster *r, float x0, float y0, float x1, float y1, uint32_
             p[1] = (uint8_t)(rgba >> 16);
             p[2] = (uint8_t)(rgba >> 8);
             p[3] = (uint8_t)(rgba);
+            if (r->zbuf) r->zbuf[y * r->width + x] = r->prim_depth;
         }
     }
 }

@@ -57,6 +57,12 @@ static void nullShutdown(PcBackend *self)
 static void nullBeginFrame(PcBackend *self) { (void)self; }
 static void nullEndFrame(PcBackend *self) { (void)self; }
 
+static void nullSetPrimDepth(PcBackend *self, uint32_t z16)
+{
+    NullBackend *nb = (NullBackend *)self;
+    pcswSetPrimDepth(&nb->raster, z16);
+}
+
 static void nullBindRdram(PcBackend *self, const uint8_t *rdram, size_t size)
 {
     NullBackend *nb = (NullBackend *)self;
@@ -131,6 +137,7 @@ PcBackend *backendCreateNull(void)
     iface.name = "Headless SW Raster";
     iface.init = nullInit;
     iface.shutdown = nullShutdown;
+    iface.set_prim_depth = nullSetPrimDepth;
     iface.begin_frame = nullBeginFrame;
     iface.end_frame = nullEndFrame;
     iface.bind_rdram = nullBindRdram;

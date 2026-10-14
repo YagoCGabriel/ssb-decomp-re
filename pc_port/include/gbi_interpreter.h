@@ -213,6 +213,10 @@ typedef struct PcBackend {
     int  (*init)(struct PcBackend *self, int width, int height, const char *title);
     void (*shutdown)(struct PcBackend *self);
 
+    /* Optional: set the depth value used by fill_rect (gsDPSetPrimDepth).
+     * NULL on backends that ignore primitive depth. */
+    void (*set_prim_depth)(struct PcBackend *self, uint32_t z);
+
     /* Frame lifecycle */
     void (*begin_frame)(struct PcBackend *self);
     void (*end_frame)(struct PcBackend *self);

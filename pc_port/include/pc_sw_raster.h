@@ -19,10 +19,12 @@ typedef struct PcSwRaster {
     uint8_t *fb;        /* RGBA8, width*height*4 */
     float *zbuf;        /* depth buffer, 0..1, cleared to 1.0 */
     int width, height;
+    float prim_depth;   /* z used by pcswFillRect (gsDPSetPrimDepth), 0..1 */
 } PcSwRaster;
 
 void pcswInit(PcSwRaster *r, uint8_t *fb, float *zbuf, int w, int h);
 void pcswClear(PcSwRaster *r, uint32_t rgba8888, float depth);
+void pcswSetPrimDepth(PcSwRaster *r, uint32_t z16); /* s15 fixed N64 depth */
 void pcswFillRect(PcSwRaster *r, float x0, float y0, float x1, float y1, uint32_t rgba8888);
 /* Draw one triangle in normalized device coords (-1..1 after ortho below).
  * `vp` is the N64 viewport (scale_x, trans_x, scale_y, trans_y) used to map

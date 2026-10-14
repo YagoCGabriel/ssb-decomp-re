@@ -321,6 +321,25 @@ static int install_rom_next_to_exe(const char *src, char *dst, size_t cap)
  * Returns 1 if at least boot_dl.bin was written. */
 static int extract_assets(const char *dir, const char *rom_path)
 {
+    /* Prefer the full extractor (writes smash.z64 normalized copy +
+     * assets.txt report too) when it sits next to this wizard. */
+    {
+        char ed[1024], ext[1300], cmd[1500];
+        exe_dir(ed, sizeof ed);
+#ifdef WIZ_WIN
+        snprintf(ext, sizeof ext, "%sss_extract.exe", ed);
+        snprintf(cmd, sizeof cmd, "\"%s\" \"%s\" \"%s\"", ext, rom_path, dir);
+#else
+        snprintf(ext, sizeof ext, "%sss_extract", ed);
+        snprintf(cmd, sizeof cmd, "'%s' '%s' '%s'", ext, rom_path, dir);
+#endif
+        {
+            struct stat st;
+            if (stat(ext, &st) == 0 && system(cmd) == 0)
+                return 1;
+        }
+    }
+
 #ifdef WIZ_WIN
 #  define WSEP '\\'
 #else
@@ -469,20 +488,47 @@ static int run_cmd(const char *cmd)
     return rc;
 }
 
+/* Search order for the game executable: beside this wizard (the shipped
+ * dist layout), then build/, build/Release/ and pc_port/build/ inside the
+ * source root (developer layouts). */
 static int find_exe(char *out, size_t cap, const char *root)
 {
-    const char *names[] = { "ssb_pc", "ssb_pc.exe", NULL };
-    size_t i;
-    for (i = 0; names[i]; i++) {
-        snprintf(out, cap, "%s/build/%s", root, names[i]);
-        if (access(out,
-#if defined(WIZ_WIN) || defined(PCPORT_X_OK_IS_F_OK)
-                   F_OK
+    const char *names[] = { "ssb_pc.exe", "ssb_pc", NULL };
+    char dir[1024];
+    size_t n, i;
+#ifdef WIZ_WIN
+    const char *subdirs[] = { "", "build\\", "build\\Release\\",
+                              "pc_port\\build\\", "pc_port\\build\\Release\\", NULL };
 #else
-                   X_OK
+    const char *subdirs[] = { "", "build/", "pc_port/build/", NULL };
 #endif
-                   ) == 0)
-            return 1;
+    exe_dir(dir, sizeof dir);
+
+    /* pass 1: next to the running wizard, then under its folder */
+    const char *bases[3];
+    bases[0] = dir;
+    bases[1] = root;
+    bases[2] = NULL;
+    for (size_t b = 0; bases[b]; b++) {
+        for (i = 0; subdirs[i]; i++) {
+            for (n = 0; names[n]; n++) {
+                snprintf(out, cap, "%s%c%s%s", bases[b],
+#ifdef WIZ_WIN
+                         '\\',
+#else
+                         '/',
+#endif
+                         subdirs[i], names[n]);
+                if (access(out,
+#if defined(WIZ_WIN) || defined(PCPORT_X_OK_IS_F_OK)
+                           F_OK
+#else
+                           X_OK
+#endif
+                           ) == 0)
+                    return 1;
+            }
+        }
     }
     return 0;
 }
@@ -566,22 +612,33 @@ int main(int argc, char **argv)
         snprintf(backend, sizeof(backend), "%s", detect_backend());
     printf("  backend selecionado: %s\n", backend);
 
-    snprintf(buf, sizeof(buf),
-             "cmake -S \"%s\" -B \"%s/build\" -DPCPORT_BACKEND_PREFERRED=%s",
-             root, root, backend);
-    if (run_cmd(buf) != 0) {
-        fprintf(stderr, "  configure falhou (cmake disponivel no PATH?)\n");
-        return 4;
-    }
-    snprintf(buf, sizeof(buf), "cmake --build \"%s/build\" --config Release", root);
-    if (run_cmd(buf) != 0) {
-        fprintf(stderr, "  build falhou\n");
-        return 5;
-    }
-
+    /* If the game executable already exists (shipped dist layout or a
+     * previous build), skip compilation entirely. Otherwise try cmake. */
     if (!find_exe(buf, sizeof(buf), root)) {
-        printf("  Executavel gerado em %s/build/ssb_pc\n", root);
-        return 0;
+        int have_cmake = (system("cmake --version >/dev/null 2>&1") == 0);
+        if (!have_cmake) {
+            fprintf(stderr,
+                "  ERRO: ssb_pc nao encontrado ao lado do setup e o cmake\n"
+                "  nao esta instalado. Na versao distribuicao, extraia TODO\n"
+                "  o conteudo do zip para UMA pasta e rode o setup de la.\n");
+            return 4;
+        }
+        snprintf(buf, sizeof(buf),
+                 "cmake -S \"%s\" -B \"%s/build\" -DPCPORT_BACKEND_PREFERRED=%s",
+                 root, root, backend);
+        if (run_cmd(buf) != 0) {
+            fprintf(stderr, "  configure falhou\n");
+            return 4;
+        }
+        snprintf(buf, sizeof(buf), "cmake --build \"%s/build\" --config Release", root);
+        if (run_cmd(buf) != 0) {
+            fprintf(stderr, "  build falhou\n");
+            return 5;
+        }
+        if (!find_exe(buf, sizeof(buf), root)) {
+            printf("  Executavel gerado em %s/build/ssb_pc\n", root);
+            return 0;
+        }
     }
     printf("  Executavel: %s\n", buf);
 
@@ -597,7 +654,7 @@ int main(int argc, char **argv)
             farg = fa;
         }
 #ifdef WIZ_WIN
-        _snprintf(cmd, sizeof(cmd), "set \"SSB_ROM=%s\" && set \"SSB_BACKEND=%s\"%s && %s",
+        _snprintf(cmd, sizeof(cmd), "set \"SSB_ROM=%s\" && set \"SSB_BACKEND=%s\"%s && \"%s\"",
                   use_rom, backend, farg[0] ? farg : "", buf);
 #else
         snprintf(cmd, sizeof(cmd), "SSB_ROM='%s' SSB_BACKEND='%s'%s '%s'",

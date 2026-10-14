@@ -489,7 +489,13 @@ static void cmdSetTile(GbiInterpreter *gi, const uint32_t *w)
     gi->state.tex_tile = tile;
     gi->state.tex_format = fmt;
     gi->state.tex_size = siz;
-    gi->state.tlut_addr = pal;
+    /* gsDPSetTile's "palette" field is only a TLUT *index* (0..31) for CI
+     * formats. The real palette address comes from the active timg when
+     * gsDPLoadTLut runs; do not write it into tlut_addr here or CI texels
+     * would sample garbage at offset 0 of RDRAM. */
+    if (fmt != 2 /* G_IM_FMT_CI */) {
+        gi->state.tlut_addr = pal;
+    }
     gi->tiles[tile].width = line ? (line * 8 / bpp[siz]) : gi->state.tex_width;
     gi->state.mask_s = masks; gi->state.shift_s = shifts;
     gi->state.mask_t = maskt; gi->state.shift_t = shiftt;
@@ -724,9 +730,12 @@ static int runRdpPacket(GbiInterpreter *gi, const uint8_t *bytes)
 
     switch (rdp) {
     case RDP_SETCIMG:
-        gi->state.tex_format = (w[0] >> 21) & 3;
-        gi->state.tex_size = (w[0] >> 19) & 3;
-        gi->state.tex_width = ((w[0] >> 9) & 0x3FF) + 1;
+        /* gsDPSetCImage carries fmt/siz/width of the framebuffer, not of a
+         * texture. The RDP pipeline reads fmt/siz from the tile descriptor
+         * (gsDPSetTile); overwriting them here corrupts texel decoding for
+         * CI4 tiles drawn onto a RGBA32 framebuffer (e.g. the title screen
+         * logo). Keep only the color-image info in state. */
+        gi->state.cimg_width = ((w[0] >> 9) & 0x3FF) + 1;
         break;
     case RDP_SETZIMG:       break;
     case RDP_SETTIMG: {
@@ -1021,8 +1030,14 @@ void gbiRunDisplayListN(GbiInterpreter *gi, const void *dlptr, size_t length_byt
             break;
         }
         case OP_LOAD_UCODE:
-        case OP_MOVEMEM:
+            /* gsSPLoadMicrocode is emitted as a macro pair: the command
+             * itself is 8 bytes and its payload (the ucode address block)
+             * occupies the next slot. Skip both so the walk stays aligned
+             * with the real list layout. */
             dlb += 16;
+            break;
+        case OP_MOVEMEM:
+            dlb += 8;
             break;
         case OP_MOVEWORD: {
             /* gSPViewport is encoded as a MoveWord into RSP dmem with the

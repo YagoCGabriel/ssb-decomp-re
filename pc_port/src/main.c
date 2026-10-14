@@ -145,7 +145,7 @@ int main(int argc, char **argv)
      * boot display list (the IPL gfx posted by osViSetMode at cold boot).
      * Without a ROM we fall back to the synthetic demo scene, which is
      * what the headless test suite exercises.
-     * ---------------------------------------------------------------- */ */
+     * ------------------------------------------------------------------ */
     const char *rom_path = getenv("SSB_ROM");
     uint8_t *rom = NULL;
     PcRomInfo rom_info;

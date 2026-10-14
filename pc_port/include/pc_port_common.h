@@ -35,6 +35,10 @@ PcBackend *backendAutoSelect(const char *preference);
 /* Virtual RDRAM: the port gives the game code a flat 8 MB buffer that stands
  * in for N64 RDRAM; display lists and assets live inside it. */
 #define PCPORT_RDRAM_SIZE (8u * 1024u * 1024u)
+
+/* Page size used when mapping a ROM boot display list into the virtual RDRAM
+ * image; bounds the top-level walk so stray data past ENDDL is never decoded. */
+#define PCPORT_RDRAM_DL_PAGE 0x1000u
 uint8_t *pcportRdram(void);
 
 /* Simple logging */

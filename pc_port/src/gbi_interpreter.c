@@ -645,7 +645,9 @@ static void cmdFillRect(GbiInterpreter *gi, const uint32_t *w)
  * into full 4-word packets before hitting the backend. */
 static int runRdpPacket(GbiInterpreter *gi, const uint8_t *bytes)
 {
-    uint32_t w[4];
+    uint32_t w[4] = {0, 0, 0, 0}; /* RDP packet words; short packets leave
+                                   * the tail words zeroed so handlers never
+                                   * read uninitialized data */
     uint8_t rdp;
 
     /* RSP-side half-packet helpers routed here defensively: they must never
@@ -751,7 +753,12 @@ static int runRdpPacket(GbiInterpreter *gi, const uint8_t *bytes)
         gi->state.othermode_hi = ((uint64_t)(w[0] & 0xFFFFFF) << 32) | w[1];
         gi->state.cycle_type = (int)((gi->state.othermode_hi >> G_MDSFT_CYCLETYPE) & 3);
         break;
-    case RDP_SETPRIMDEPTH:  break;
+    case RDP_SETPRIMDEPTH:
+        /* z is s15 fixed in w[1]; fills write this depth afterwards. */
+        if (gi->backend && gi->backend->set_prim_depth) {
+            gi->backend->set_prim_depth(gi->backend, w[1] & 0xFFFFu);
+        }
+        break;
     case RDP_SETSCISSOR:
         /* the adjacent-packing path may read past a 2-word test packet;
          * only dispatch when the continuation words are in-bounds */
@@ -867,7 +874,7 @@ void gbiRunDisplayListN(GbiInterpreter *gi, const void *dlptr, size_t length_byt
                 continue;
             }
             {
-                uint32_t pw[4];
+                uint32_t pw[4] = {0, 0, 0, 0};
                 int dispatch_now = 1;
                 pw[0] = gi->pend_w[0];      /* command header word */
                 pw[1] = gi->pend_w[1];      /* low half from the command */
@@ -905,7 +912,10 @@ void gbiRunDisplayListN(GbiInterpreter *gi, const void *dlptr, size_t length_byt
                     continue;
                 }
                 /* LOADTLUT/LOADBLOCK: dispatch with the words we have, then
-                 * fall through to normal handling of the tail command. */
+                 * fall through to normal handling of the tail command.
+                 * pw[3] is consumed later by the trailing SETTILESIZE pair;
+                 * zero it so handlers never read an uninitialized word. */
+                pw[3] = 0;
                 gi->pending4w = 0;
                 gi->pend_half2_seen = 0;
                 switch ((uint8_t)(pw[0] >> 24)) {

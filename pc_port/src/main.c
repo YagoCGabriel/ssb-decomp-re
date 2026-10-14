@@ -96,7 +96,9 @@ static size_t buildDemoList(size_t vtx_off, size_t dl_off)
     /* Clear ZBUFFER + culling bits (gsPClearGeometryMode: bit8 of w0 set) */
     o = wp(o, (OP_GEOMETRYMODE << 24) | (1u << 8), (1u << 0) | (1u << 9) | (1u << 10));
 
-    /* Background fill (fill color cyan) */
+    /* Background fill (fill color cyan), pushed to primitive far depth so
+     * it behaves like a real background instead of occluding the scene. */
+    o = wp(o, (RDP_SETPRIMDEPTH << 24) | 0x7FFFu, 0u);
     o = wp(o, (RDP_SETFILLCOLOR << 24), 0x20C0C0FFu);
     o = rdp4(o, (RDP_FILLRECT << 24), 0u, (319u << 16) | 239u, 0u);
 

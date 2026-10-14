@@ -8,6 +8,7 @@ option(PCPORT_HAVE_VULKAN "Build the Vulkan backend" OFF)
 option(PCPORT_HAVE_D3D    "Build the Direct3D 10/11 backends (Windows only)" OFF)
 
 add_library(ssb_pc_core STATIC
+    src/pc_config.c
     src/gbi_interpreter.c
     src/port_common.c
     src/libultra_stub.c
@@ -73,4 +74,18 @@ if(MSVC)
   target_compile_options(ssb_setup PRIVATE /W4)
 else()
   target_compile_options(ssb_setup PRIVATE -Wall -Wextra)
+endif()
+
+# ---------------------------------------------------------------------------
+# Advanced launcher ("Janela de configuracao"): native Win32 GUI on Windows,
+# interactive TUI elsewhere. Saves ssb_config.ini and starts ssb_pc with it.
+# ---------------------------------------------------------------------------
+add_executable(ssb_launcher tools/launcher.c)
+if(WIN32 OR MINGW)
+  target_link_libraries(ssb_launcher PRIVATE comdlg32 ole32 user32 gdi32)
+endif()
+if(MSVC)
+  target_compile_options(ssb_launcher PRIVATE /W4)
+else()
+  target_compile_options(ssb_launcher PRIVATE -Wall -Wextra)
 endif()

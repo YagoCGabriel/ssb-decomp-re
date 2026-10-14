@@ -17,6 +17,26 @@
 #include "gbi_opcodes.h"
 #include "pc_libultra.h"
 #include "pc_rom.h"
+#include "pc_config.h"
+
+static void usage(const char *argv0)
+{
+    printf("usage: %s [options]\n"
+           "  --config <file.ini>   load advanced settings from file\n"
+           "  --rom <path>          .z64/.v64/.n64 Super Smash Bros. image\n"
+           "  --backend auto|vulkan|d3d11|d3d10|null\n"
+           "  --frames N            exit after N frames (0 = until closed)\n"
+           "  --width W --height H  window size      --fullscreen 0|1\n"
+           "  --vsync 0|1|2         --max_fps N      --headless 0|1\n"
+           "  --resolution_scale F  internal buffer scale (e.g. 2.0)\n"
+           "  --internal_width W --internal_height H  explicit render size\n"
+           "  --aspect F (<=0 => 4:3)  --integer_scale 0|1\n"
+           "  --cull_mode 0|1|2     --depth_func 0..3  --wireframe 0|1\n"
+           "  --clear_color 0xRRGGBBAA  --anisotropy 1..16  --msaa 0|2|4|8\n"
+           "  --log_level 0..3      --sim_buttons 0xHEX  --dump_dir <dir>\n"
+           "Env overrides: SSB_<KEY> (SSB_BACKEND, SSB_ROM, ...). CLI wins.\n",
+           argv0);
+}
 
 /* Helpers exported by the null backend for headless validation. */
 const uint8_t *nullFramebuffer(void);
@@ -119,12 +139,16 @@ static size_t buildDemoList(size_t vtx_off, size_t dl_off)
 
 int main(int argc, char **argv)
 {
-    (void)argc; (void)argv;
+    int want_help = pcConfigInit(argc, argv);
+    if (want_help) { usage(argv[0]); return 0; }
+    PcConfig *cfg = pcConfig();
+    pcConfigLog(cfg);
 
-    PcBackend *be = backendAutoSelect(NULL);
+    PcBackend *be = backendAutoSelect(cfg->backend[0] ? cfg->backend : NULL);
     if (!be) { fprintf(stderr, "no backend available\n"); return 1; }
 
     int W = VW, H = VH;
+    pcConfigFramebufferSize(cfg, &W, &H);
     if (!be->init(be, W, H, "SSB64 PC Port")) {
         fprintf(stderr, "backend init failed\n");
         return 1;
@@ -146,7 +170,7 @@ int main(int argc, char **argv)
      * Without a ROM we fall back to the synthetic demo scene, which is
      * what the headless test suite exercises.
      * ------------------------------------------------------------------ */
-    const char *rom_path = getenv("SSB_ROM");
+    const char *rom_path = cfg->rom[0] ? cfg->rom : getenv("SSB_ROM");
     uint8_t *rom = NULL;
     PcRomInfo rom_info;
     uint32_t rom_dl_addr = 0;
@@ -182,16 +206,13 @@ int main(int argc, char **argv)
     PcOsVi *vi = pcViCreate(gi);
     PcGbiBridge *br = pcGbiBridgeCreate(vi);
 
-    int is_null = getenv("SSB_BACKEND") && strcmp(getenv("SSB_BACKEND"), "null") == 0;
-    int frames = is_null ? 1 : 240; /* ~4s at 60fps on GPU backends */
-    {
-        const char *f_env = getenv("SSB_FRAMES"); /* CI override from setup wizard */
-        if (f_env) { int n = atoi(f_env); if (n > 0) frames = n; }
-    }
+    int is_null = strcmp(be->name ? be->name : "null", "null") == 0 ||
+                  (cfg->backend && !strcmp(cfg->backend, "null"));
+    int frames = cfg->frames > 0 ? cfg->frames : (is_null ? 1 : 240);
 
     for (int f = 0; f < frames; f++) {
         be->begin_frame(be);
-        be->clear(be, 0x102030FFu, 1.0f);
+        be->clear(be, cfg->clear_color, 1.0f);
         /* Game scheduler would post the frame's gfx task here; run it via
          * the bridge exactly like osSpQueueYielded/osAfterMniTask paths. */
         if (using_rom)
@@ -202,6 +223,21 @@ int main(int argc, char **argv)
         pcAudioTick((uint32_t)f); /* audio tick (stub) */
         pcViWaitRetrace(vi);
         pcViSwapBuffers(vi);
+
+        /* advanced config: periodic framebuffer dump for tooling/parity tests */
+        if (cfg->dump_dir[0] && ((f + 1) % 60) == 0) {
+            char dpath[640];
+            snprintf(dpath, sizeof dpath, "%s/frame_%05d.rgba", cfg->dump_dir, f + 1);
+            const uint8_t *fbpx = nullFramebuffer(); /* sw reference fb (null backend) */
+            FILE *df = fopen(dpath, "wb");
+            if (df && fbpx) {
+                fwrite(fbpx, 1, (size_t)W * H * 4, df);
+                fclose(df);
+                pclog("config: dumped frame %d -> %s", f + 1, dpath);
+            } else if (df) {
+                fclose(df);
+            }
+        }
     }
 
     if (is_null && !using_rom) {

@@ -7,6 +7,13 @@
 #include <string.h>
 #include <ctype.h>
 
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>   /* GetModuleFileNameA for local-ROM discovery */
+#endif
+
 static PcConfig g_cfg;
 static int      g_loaded;
 
@@ -132,6 +139,33 @@ static void load_env(PcConfig *c) {
     }
 }
 
+/* Auto-discover a ROM placed next to the executable (the setup wizard
+ * copies the user-selected ROM there as "smash.z64"). Only used when no
+ * rom was configured by ini/env/CLI. */
+static void discover_local_rom(PcConfig *c) {
+    static const char *names[] = { "smash.z64", "ssb.z64", "game.z64", NULL };
+    size_t i;
+#ifdef _WIN32
+    char exe[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, exe, sizeof exe);
+    if (n == 0 || n >= sizeof exe) return;
+    char *slash = strrchr(exe, '\\');
+    if (!slash) return;
+    *slash = '\0'; /* dir of the executable */
+    for (i = 0; names[i]; i++) {
+        char p[MAX_PATH * 2];
+        snprintf(p, sizeof p, "%s\\%s", exe, names[i]);
+        FILE *f = fopen(p, "rb");
+        if (f) { fclose(f); set_str(c->rom, sizeof c->rom, p); return; }
+    }
+#else
+    for (i = 0; names[i]; i++) {
+        FILE *f = fopen(names[i], "rb");
+        if (f) { fclose(f); set_str(c->rom, sizeof c->rom, names[i]); return; }
+    }
+#endif
+}
+
 int pcConfigInit(int argc, char **argv) {
     PcConfig *c = pcConfig();
     pcConfigDefaults(c);
@@ -180,6 +214,10 @@ int pcConfigInit(int argc, char **argv) {
         lk[j] = '\0';
         apply(c, lk, val);
     }
+
+    /* pass 4: no rom configured anywhere -> pick up a ROM sitting next to
+     * the executable (installed by ssb_setup / launcher "instalar na pasta") */
+    if (!c->rom[0]) discover_local_rom(c);
     return 0;
 }
 

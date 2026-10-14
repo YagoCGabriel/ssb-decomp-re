@@ -20,16 +20,19 @@
  *   cc -O2 -std=c99 tools/setup_wizard.c -o build/setup        # CLI-only
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
-
 #if !(defined(_WIN32) || defined(PCPORT_USE_WIN32))
 #  ifndef _POSIX_C_SOURCE
 #    define _POSIX_C_SOURCE 200809L
 #  endif
+#  ifndef _DEFAULT_SOURCE   /* readlink/ssize_t with strict -std=c99 */
+#    define _DEFAULT_SOURCE
+#  endif
 #endif
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
 
 #if defined(_WIN32) || defined(PCPORT_USE_WIN32)
 #  define WIZ_WIN 1
@@ -56,6 +59,9 @@
 #endif
 
 #define WIZ_VERSION "1.0"
+
+/* Installed ROM path (set in step 2 when the copy next to the exe succeeds). */
+static char *g_installed;
 
 /* ------------------------------------------------------------------ */
 /* ROM validation (mirrors pc_port/src/rom_loader.c + setup_wizard.py) */
@@ -252,6 +258,62 @@ static int ask_rom_path(char *out, size_t cap)
 }
 
 /* ------------------------------------------------------------------ */
+/* Install the selected ROM next to this executable                    */
+/* ------------------------------------------------------------------ */
+
+/* Directory that contains the running executable (best effort). */
+static void exe_dir(char *out, size_t cap)
+{
+#ifdef WIZ_WIN
+    char full[MAX_PATH * 2];
+    DWORD n = GetModuleFileNameA(NULL, full, sizeof(full));
+    if (n == 0 || n >= sizeof(full)) { snprintf(out, cap, "."); return; }
+    char *slash = strrchr(full, '\\');
+    if (!slash) { snprintf(out, cap, "."); return; }
+    *slash = '\0';
+    snprintf(out, cap, "%s", full);
+#else
+    ssize_t n = readlink("/proc/self/exe", out, cap - 1);
+    if (n <= 0) { snprintf(out, cap, "."); return; }
+    out[n] = '\0';
+    char *slash = strrchr(out, '/');
+    if (slash) *slash = '\0'; else snprintf(out, cap, ".");
+#endif
+}
+
+/* Copy the user-selected ROM into the executable's folder as "smash.z64"
+ * (canonical name auto-discovered by ssb_pc/ssb_launcher at startup).
+ * Returns 1 on success; dst receives the installed path. */
+static int install_rom_next_to_exe(const char *src, char *dst, size_t cap)
+{
+    char dir[1024];
+    FILE *in, *out;
+    static char buf[65536];
+    size_t rd;
+
+    exe_dir(dir, sizeof(dir));
+    snprintf(dst, cap, "%s%csmash.z64", dir,
+#ifdef WIZ_WIN
+             '\\'
+#else
+             '/'
+#endif
+            );
+    if (!strcmp(src, dst)) return 1; /* already installed here */
+
+    in = fopen(src, "rb");
+    if (!in) return 0;
+    out = fopen(dst, "wb");
+    if (!out) { fclose(in); return 0; }
+    while ((rd = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, rd, out) != rd) { fclose(in); fclose(out); return 0; }
+    }
+    fclose(in);
+    fclose(out);
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* Backend auto-detect + build/run                                     */
 /* ------------------------------------------------------------------ */
 
@@ -358,8 +420,20 @@ int main(int argc, char **argv)
         printf("  boot display list @ 0x%08X (integrada na RDRAM em runtime)\n",
                ri.boot_dl);
 
-    /* ---- Step 2: asset integration report ------------------------- */
+    /* ---- Step 2: asset integration report + install ROM ------------ */
     printf("\n[2/3] Integracao de assets\n");
+    {
+        char installed[1024] = "";
+        if (install_rom_next_to_exe(rom, installed, sizeof(installed))) {
+            g_installed = (char *)malloc(sizeof(installed));
+            if (g_installed) memcpy(g_installed, installed, sizeof(installed));
+            printf("  - ROM instalada na pasta dos executaveis: %s\n", installed);
+            printf("    (ssb_pc e ssb_launcher encontram smash.z64 automaticamente)\n");
+        } else {
+            printf("  AVISO: nao foi possivel copiar a ROM para a pasta do programa;\n"
+                   "         usando o caminho original em runtime.\n");
+        }
+    }
     printf("  - paginas da boot DL copiadas para o espelho de RDRAM (osPi DMA)\n");
     printf("  - ucode F3DEX2 interpretado pelo nucleo pc_port (gbi_interpreter)\n");
     printf("  - texturas/tiles decodificados no caminho gsDPSetTile/LoadBlock\n");
@@ -389,10 +463,12 @@ int main(int argc, char **argv)
     }
     printf("  Executavel: %s\n", buf);
 
-    /* launch with the selected ROM: pass env inline so it works on MSVC too */
+    /* launch with the selected ROM: prefer the copy installed next to the
+     * executables (step 2); pass env inline so it works on MSVC too */
     {
         char cmd[6400];
         const char *farg = "";
+        const char *use_rom = (g_installed && g_installed[0]) ? g_installed : rom;
         if (frames > 0) {
             static char fa[32];
             snprintf(fa, sizeof(fa), " SSB_FRAMES=%d", frames);
@@ -400,10 +476,10 @@ int main(int argc, char **argv)
         }
 #ifdef WIZ_WIN
         _snprintf(cmd, sizeof(cmd), "set \"SSB_ROM=%s\" && set \"SSB_BACKEND=%s\"%s && %s",
-                  rom, backend, farg[0] ? farg : "", buf);
+                  use_rom, backend, farg[0] ? farg : "", buf);
 #else
         snprintf(cmd, sizeof(cmd), "SSB_ROM='%s' SSB_BACKEND='%s'%s '%s'",
-                 rom, backend, farg, buf);
+                 use_rom, backend, farg, buf);
 #endif
         {
             int rc = run_cmd(cmd);

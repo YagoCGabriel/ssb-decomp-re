@@ -11,6 +11,16 @@
  *   4. inicia ssb_pc.exe/ssb_pc passando --config (e variáveis SSB_* como
  *      redundância para builds antigos).
  */
+#ifndef _WIN32
+#  ifndef _POSIX_C_SOURCE
+#    define _POSIX_C_SOURCE 200809L
+#  endif
+#  ifndef _DEFAULT_SOURCE
+#    define _DEFAULT_SOURCE
+#  endif
+#  include <unistd.h>   /* readlink for exe_dir */
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -185,9 +195,62 @@ static void print_summary(void) {
     printf("---------------------------------------------------------------\n");
 }
 
+/* ------------------------------------------------------- ROM install dir */
+/* Directory that contains the running executable (best effort). */
+static void exe_dir(char *out, size_t cap) {
+#ifdef _WIN32
+    char full[MAX_PATH * 2];
+    DWORD n = GetModuleFileNameA(NULL, full, sizeof full);
+    if (n == 0 || n >= sizeof full) { snprintf(out, cap, "."); return; }
+    char *slash = strrchr(full, '\\');
+    if (!slash) { snprintf(out, cap, "."); return; }
+    *slash = '\0';
+    snprintf(out, cap, "%s", full);
+#else
+    ssize_t n = readlink("/proc/self/exe", out, cap - 1);
+    if (n <= 0) { snprintf(out, cap, "."); return; }
+    out[n] = '\0';
+    char *slash = strrchr(out, '/');
+    if (slash) *slash = '\0'; else snprintf(out, cap, ".");
+#endif
+}
+
+/* Copy the selected ROM next to the executables as "smash.z64" — the name
+ * ssb_pc/ssb_launcher auto-discover at startup. On success g.rom is updated
+ * to the installed path. Returns 1 on success. */
+static int install_rom_local(void) {
+    char dir[1024], dst[1024 + 16];
+    FILE *in, *out;
+    static char buf[65536];
+    size_t rd;
+
+    if (!g.rom[0]) return 0;
+    exe_dir(dir, sizeof dir);
+#ifdef _WIN32
+    snprintf(dst, sizeof dst, "%s\\smash.z64", dir);
+#else
+    snprintf(dst, sizeof dst, "%s/smash.z64", dir);
+#endif
+    if (!strcmp(g.rom, dst)) return 1; /* already installed here */
+    in = fopen(g.rom, "rb");
+    if (!in) return 0;
+    out = fopen(dst, "wb");
+    if (!out) { fclose(in); return 0; }
+    while ((rd = fread(buf, 1, sizeof buf, in)) > 0) {
+        if (fwrite(buf, 1, rd, out) != rd) { fclose(in); fclose(out); return 0; }
+    }
+    fclose(in); fclose(out);
+    if (strlen(dst) < sizeof g.rom) snprintf(g.rom, sizeof g.rom, "%s", dst);
+    printf("ROM instalada na pasta do programa: %s\n", dst);
+    return 1;
+}
+
 /* ------------------------------------------------------------- launching */
 static int launch_game(int build_if_missing) {
     const char *ini = "ssb_config.ini";
+    if (g.rom[0] && !install_rom_local())
+        printf("AVISO: nao foi possivel instalar a ROM ao lado dos executaveis;"
+               " usando o caminho original.\n");
     if (save_ini(ini) != 0) { fprintf(stderr, "falha ao salvar %s\n", ini); return 1; }
     printf("config gravada em %s\n", ini);
 
@@ -290,10 +353,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (GetOpenFileNameA(&of)) {
                 SetWindowTextA(hRom, file);
                 char m[256];
-                if (rom_ok(file, m, sizeof m))
-                    MessageBoxA(hwnd, m, "ROM compativel", MB_OK | MB_ICONINFORMATION);
-                else
+                if (rom_ok(file, m, sizeof m)) {
+                    snprintf(g.rom, sizeof g.rom, "%s", file);
+                    install_rom_local();      /* copia p/ pasta do programa */
+                    SetWindowTextA(hRom, g.rom);
+                    MessageBoxA(hwnd, m, "ROM compativel - instalada na pasta do jogo",
+                                MB_OK | MB_ICONINFORMATION);
+                } else {
                     MessageBoxA(hwnd, m, "ROM incompativel", MB_OK | MB_ICONERROR);
+                }
             }
             break; }
         case 102: /* Salvar */
@@ -454,6 +522,10 @@ static int tui_main(void) {
             g.integer_scale = ask_int("escala inteira 0/1", g.integer_scale);
             break;
         case 'S': save_ini("ssb_config.ini"); printf("salvo.\n"); break;
+        case 'i':
+            if (install_rom_local()) { save_ini("ssb_config.ini"); printf("instalado e salvo.\n"); }
+            else printf("nada a instalar (defina a ROM em 'a').\n");
+            break;
         case 'G': return launch_game(1);
         case 'q': return 0;
         default: printf("opcao desconhecida\n");

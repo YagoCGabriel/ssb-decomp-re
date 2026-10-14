@@ -80,6 +80,13 @@ endif()
 # Advanced launcher ("Janela de configuracao"): native Win32 GUI on Windows,
 # interactive TUI elsewhere. Saves ssb_config.ini and starts ssb_pc with it.
 # ---------------------------------------------------------------------------
+add_executable(ssb_extract tools/ssb_extract.c)
+if(MSVC)
+  target_compile_options(ssb_extract PRIVATE /W4)
+else()
+  target_compile_options(ssb_extract PRIVATE -Wall -Wextra)
+endif()
+
 add_executable(ssb_launcher tools/launcher.c)
 if(WIN32 OR MINGW)
   target_link_libraries(ssb_launcher PRIVATE comdlg32 ole32 user32 gdi32)

@@ -68,6 +68,20 @@ uint32_t PcRomIntegrateBoot(const uint8_t *rom, uint32_t rom_size,
  * src/sys/dma.c (D_800D3010). Exposed so the CLI setup flow can print it. */
 extern const uint8_t pcRomSmashMd5[16];
 
+/* Canonical RDRAM slot where extracted boot assets are loaded. */
+#define PCPORT_RDRAM_DL_BASE_BOOT 0x4000u
+
+/* Path separator string for the target platform. */
+#ifdef _WIN32
+#  define PATHSEP "\\"
+#else
+#  define PATHSEP "/"
+#endif
+
+/* Directory of the running executable, with trailing separator, written to
+ * `out`. Returns 1 on success, 0 if it cannot be determined. */
+int pcRomExeDir(char *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

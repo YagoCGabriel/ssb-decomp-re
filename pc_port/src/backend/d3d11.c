@@ -19,8 +19,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _MSC_VER
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
+#endif
+
+
+/* ID3DBlob accessors are inline-only in the mingw-w64 C headers; use vtbl directly. */
+static void *blobPtr(ID3DBlob *b) { return b->lpVtbl->GetBufferPointer(b); }
+static SIZE_T blobSize(ID3DBlob *b) { return b->lpVtbl->GetBufferSize(b); }
 
 typedef struct D3D11Backend {
     PcBackend base;
@@ -66,23 +73,23 @@ static int compileShaders(D3D11Backend *b)
     HMODULE dcc = LoadLibraryA("d3dcompiler.dll");
     typedef HRESULT(WINAPI *pfn)(LPCVOID, SIZE_T, LPCVOID, const void *, const void *,
                                  LPCVOID, LPCVOID, UINT, UINT, ID3DBlob **, ID3DBlob **);
-    pfn compile = dcc ? (pfn)GetProcAddress(dcc, "D3DCompile") : NULL;
+    pfn compile = dcc ? (pfn)(void *)GetProcAddress(dcc, "D3DCompile") : NULL;
     if (!compile) return 0;
     hr = compile(VS_SRC, strlen(VS_SRC), NULL, NULL, NULL, "main", "vs_4_0_level_9_1", 0, 0, &vsb, &err);
     if (FAILED(hr)) return 0;
     hr = compile(PS_SRC, strlen(PS_SRC), NULL, NULL, NULL, "main", "ps_4_0_level_9_1", 0, 0, &psb, &err);
     if (FAILED(hr)) { vsb->lpVtbl->Release(vsb); return 0; }
-    if (FAILED(b->device->lpVtbl->CreateVertexShader(b->device, vsb->GetBufferPointer(vsb),
-            vsb->GetBufferSize(vsb), NULL, &b->vs))) { return 0; }
-    if (FAILED(b->device->lpVtbl->CreatePixelShader(b->device, psb->GetBufferPointer(psb),
-            psb->GetBufferSize(psb), NULL, &b->ps))) { return 0; }
+    if (FAILED(b->device->lpVtbl->CreateVertexShader(b->device, blobPtr(vsb),
+            blobSize(vsb), NULL, &b->vs))) { return 0; }
+    if (FAILED(b->device->lpVtbl->CreatePixelShader(b->device, blobPtr(psb),
+            blobSize(psb), NULL, &b->ps))) { return 0; }
     {
         D3D11_INPUT_ELEMENT_DESC il[] = {
             { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
             { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
         };
         if (FAILED(b->device->lpVtbl->CreateInputLayout(b->device, il, 2,
-                vsb->GetBufferPointer(vsb), vsb->GetBufferSize(vsb), &b->layout))) return 0;
+                blobPtr(vsb), blobSize(vsb), &b->layout))) return 0;
     }
     vsb->lpVtbl->Release(vsb); psb->lpVtbl->Release(psb);
     return 1;
@@ -117,7 +124,17 @@ static int d3d11Init(PcBackend *self, int width, int height, const char *title)
     {
         D3D_FEATURE_LEVEL flWant[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
         D3D_FEATURE_LEVEL flGot;
-        if (FAILED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
+        /* Runtime-load d3d11.dll so the final .exe has no import-time
+         * dependency: machines without D3D11 fall through to the next
+         * backend instead of failing with "dll not found". */
+        typedef HRESULT (WINAPI *PFN_D3D11CDS)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE,
+            UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, const DXGI_SWAP_CHAIN_DESC *,
+            IDXGISwapChain **, ID3D11Device **, D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);
+        PFN_D3D11CDS createFn = NULL;
+        HMODULE d3d11Dll = LoadLibraryA("d3d11.dll");
+        if (d3d11Dll) createFn = (PFN_D3D11CDS)(void *)GetProcAddress(d3d11Dll, "D3D11CreateDeviceAndSwapChain");
+        if (!createFn) return 0;
+        if (FAILED(createFn(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
                 flWant, 3, D3D11_SDK_VERSION, &sc, &b->swap, &b->device, &flGot, &b->ctx)))
             return 0;
     }
@@ -128,7 +145,7 @@ static int d3d11Init(PcBackend *self, int width, int height, const char *title)
     {
         ID3D11Texture2D *bb = NULL;
         if (FAILED(b->swap->lpVtbl->GetBuffer(b->swap, 0, &IID_ID3D11Texture2D, (void **)&bb))) return 0;
-        if (FAILED(b->device->lpVtbl->CreateRenderTargetView(b->device, bb, NULL, &b->rtv))) { bb->lpVtbl->Release(bb); return 0; }
+        if (FAILED(b->device->lpVtbl->CreateRenderTargetView(b->device, (ID3D11Resource *)bb, NULL, &b->rtv))) { bb->lpVtbl->Release(bb); return 0; }
         bb->lpVtbl->Release(bb);
     }
     memset(&dd, 0, sizeof(dd));
@@ -138,7 +155,7 @@ static int d3d11Init(PcBackend *self, int width, int height, const char *title)
     if (FAILED(b->device->lpVtbl->CreateTexture2D(b->device, &dd, NULL, &b->depthTex))) return 0;
     memset(&dsv, 0, sizeof(dsv));
     dsv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT; dsv.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-    if (FAILED(b->device->lpVtbl->CreateDepthStencilView(b->device, b->depthTex, &dsv, &b->dsav))) return 0;
+    if (FAILED(b->device->lpVtbl->CreateDepthStencilView(b->device, (ID3D11Resource *)b->depthTex, &dsv, &b->dsav))) return 0;
 
     {   /* dynamic vertex buffer for one triangle at a time */
         D3D11_BUFFER_DESC vd;
@@ -240,7 +257,8 @@ static void mapTri(const PcVertex *v, const float vp[4], int w, int h, GpuVert *
     out->x = (px / (float)w) * 2.0f - 1.0f;
     out->y = (py / (float)h) * 2.0f - 1.0f;
     out->z = v->pos[2] * 0.5f + 0.5f;
-    if (out->z < 0) out->z = 0; if (out->z > 1) out->z = 1;
+    if (out->z < 0) out->z = 0;
+    if (out->z > 1) out->z = 1;
     out->r = v->color[0]; out->g = v->color[1]; out->b = v->color[2]; out->a = v->color[3];
 }
 

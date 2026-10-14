@@ -37,6 +37,15 @@
 #    define WIN32_LEAN_AND_MEAN
 #  endif
 #  include <windows.h>
+#  include <commdlg.h>   /* OPENFILENAMEW / GetOpenFileNameW (not pulled in by LEAN_AND_MEAN on mingw) */
+#  include <io.h>      /* access(), F_OK/X_OK shims for MSVC/mingw */
+#  ifndef F_OK
+#    define F_OK 0
+#  endif
+#  ifndef X_OK
+#    define X_OK 1
+#    define PCPORT_X_OK_IS_F_OK 1
+#  endif
 #else
 #  include <unistd.h>
 #  include <sys/wait.h>
@@ -292,8 +301,8 @@ static int find_exe(char *out, size_t cap, const char *root)
     for (i = 0; names[i]; i++) {
         snprintf(out, cap, "%s/build/%s", root, names[i]);
         if (access(out,
-#ifdef WIZ_WIN
-                   0
+#if defined(WIZ_WIN) || defined(PCPORT_X_OK_IS_F_OK)
+                   F_OK
 #else
                    X_OK
 #endif

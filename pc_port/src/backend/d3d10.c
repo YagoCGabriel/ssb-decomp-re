@@ -14,7 +14,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _MSC_VER
 #pragma comment(lib, "d3d10.lib")
+#endif
+
+
+/* ID3D10Blob accessors are inline-only in the mingw-w64 C headers; use vtbl directly. */
+static void *blobPtr(ID3D10Blob *b) { return b->lpVtbl->GetBufferPointer(b); }
+static SIZE_T blobSize(ID3D10Blob *b) { return b->lpVtbl->GetBufferSize(b); }
 
 typedef struct D3D10Backend {
     PcBackend base;
@@ -55,26 +62,26 @@ static int compileShaders10(D3D10Backend *b)
     HMODULE dcc = LoadLibraryA("d3dcompiler.dll");
     typedef HRESULT (WINAPI *pfn)(LPCVOID, SIZE_T, LPCVOID, const void *, const void *,
                                   LPCVOID, LPCVOID, UINT, UINT, ID3D10Blob **, ID3D10Blob **);
-    pfn compile = dcc ? (pfn)GetProcAddress(dcc, "D3DCompile") : NULL;
+    pfn compile = dcc ? (pfn)(void *)GetProcAddress(dcc, "D3DCompile") : NULL;
     if (!compile) return 0;
     if (FAILED(compile(VS_SRC, strlen(VS_SRC), NULL, NULL, NULL, "main", "vs_4_0", 0, 0, &vsb, &err)))
         return 0;
     if (FAILED(compile(PS_SRC, strlen(PS_SRC), NULL, NULL, NULL, "main", "ps_4_0", 0, 0, &psb, &err))) {
-        vsb->Release(vsb); return 0;
+        vsb->lpVtbl->Release(vsb); return 0;
     }
-    if (FAILED(b->dev->CreateVertexShader(b->dev, vsb->GetBufferPointer(vsb),
-            vsb->GetBufferSize(vsb), &b->vs))) return 0;
-    if (FAILED(b->dev->CreatePixelShader(b->dev, psb->GetBufferPointer(psb),
-            psb->GetBufferSize(psb), &b->ps))) return 0;
+    if (FAILED(b->dev->lpVtbl->CreateVertexShader(b->dev, blobPtr(vsb),
+            blobSize(vsb), &b->vs))) return 0;
+    if (FAILED(b->dev->lpVtbl->CreatePixelShader(b->dev, blobPtr(psb),
+            blobSize(psb), &b->ps))) return 0;
     {
         D3D10_INPUT_ELEMENT_DESC il[] = {
             { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D10_INPUT_PER_VERTEX_DATA, 0 },
             { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D10_INPUT_PER_VERTEX_DATA, 0 },
         };
-        if (FAILED(b->dev->CreateInputLayout(b->dev, il, 2,
-                vsb->GetBufferPointer(vsb), vsb->GetBufferSize(vsb), &b->layout))) return 0;
+        if (FAILED(b->dev->lpVtbl->CreateInputLayout(b->dev, il, 2,
+                blobPtr(vsb), blobSize(vsb), &b->layout))) return 0;
     }
-    vsb->Release(vsb); psb->Release(psb);
+    vsb->lpVtbl->Release(vsb); psb->lpVtbl->Release(psb);
     return 1;
 }
 
@@ -104,52 +111,65 @@ static int d3d10Init(PcBackend *self, int width, int height, const char *title)
     sc.OutputWindow = b->hwnd; sc.Windowed = TRUE;
     sc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
-    if (FAILED(D3D10CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
-            D3D10_SDK_VERSION, &sc, &b->swap, &b->dev)))
-        return 0;
+    {
+        /* Runtime-load d3d10.dll so the final .exe has no import-time
+         * dependency: machines without D3D10 fall through to the next backend. */
+        typedef HRESULT (WINAPI *PFN_D3D10CDS)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE,
+            UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, const DXGI_SWAP_CHAIN_DESC *,
+            IDXGISwapChain **, ID3D10Device **);
+        PFN_D3D10CDS createFn = NULL;
+        HMODULE d3d10Dll = LoadLibraryA("d3d10.dll");
+        if (d3d10Dll) createFn = (PFN_D3D10CDS)(void *)GetProcAddress(d3d10Dll, "D3D10CreateDeviceAndSwapChain");
+        if (!createFn) return 0;
+        /* signature: adapter, driverType, software, flags, pFeatureLevels,
+         * FeatureLevelCount, SDKVersion, pSwapChainDesc, ppSwapChain, ppDevice */
+        if (FAILED(createFn(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
+            NULL, 0, D3D10_SDK_VERSION, &sc, &b->swap, &b->dev)))
+            return 0;
+    }
     if (!compileShaders10(b)) return 0;
 
     {
         ID3D10Texture2D *bb = NULL;
-        if (FAILED(b->swap->GetBuffer(b->swap, 0, &IID_ID3D10Texture2D, (void **)&bb))) return 0;
-        if (FAILED(b->dev->CreateRenderTargetView(b->dev, bb, NULL, &b->rtv))) { bb->Release(bb); return 0; }
-        bb->Release(bb);
+        if (FAILED(b->swap->lpVtbl->GetBuffer(b->swap, 0, &IID_ID3D10Texture2D, (void **)&bb))) return 0;
+        if (FAILED(b->dev->lpVtbl->CreateRenderTargetView(b->dev, (ID3D10Resource *)bb, NULL, &b->rtv))) { bb->lpVtbl->Release(bb); return 0; }
+        bb->lpVtbl->Release(bb);
     }
     memset(&dd, 0, sizeof(dd));
     dd.Width = width; dd.Height = height; dd.MipLevels = 1; dd.ArraySize = 1;
     dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT; dd.SampleDesc.Count = 1;
     dd.Usage = D3D10_USAGE_DEFAULT; dd.BindFlags = D3D10_BIND_DEPTH_STENCIL;
-    if (FAILED(b->dev->CreateTexture2D(b->dev, &dd, NULL, &b->depthTex))) return 0;
+    if (FAILED(b->dev->lpVtbl->CreateTexture2D(b->dev, &dd, NULL, &b->depthTex))) return 0;
     memset(&dsv, 0, sizeof(dsv));
     dsv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT; dsv.ViewDimension = D3D10_DSV_DIMENSION_TEXTURE2D;
-    if (FAILED(b->dev->CreateDepthStencilView(b->dev, (ID3D10Resource *)b->depthTex, &dsv, &b->dsav))) return 0;
+    if (FAILED(b->dev->lpVtbl->CreateDepthStencilView(b->dev, (ID3D10Resource *)b->depthTex, &dsv, &b->dsav))) return 0;
 
     {
         D3D10_BUFFER_DESC vd;
         memset(&vd, 0, sizeof(vd));
         vd.ByteWidth = sizeof(GpuVert10) * 3; vd.Usage = D3D10_USAGE_DEFAULT;
         vd.BindFlags = D3D10_BIND_VERTEX_BUFFER;
-        if (FAILED(b->dev->CreateBuffer(b->dev, &vd, NULL, &b->vb))) return 0;
+        if (FAILED(b->dev->lpVtbl->CreateBuffer(b->dev, &vd, NULL, &b->vb))) return 0;
     }
     {
         D3D10_RASTERIZER_DESC rd;
         memset(&rd, 0, sizeof(rd));
         rd.FillMode = D3D10_FILL_SOLID; rd.CullMode = D3D10_CULL_NONE; rd.ScissorEnable = TRUE;
         rd.DepthClipEnable = TRUE;
-        b->dev->CreateRasterizerState(b->dev, &rd, &b->rsNoCull);
+        b->dev->lpVtbl->CreateRasterizerState(b->dev, &rd, &b->rsNoCull);
         rd.CullMode = D3D10_CULL_FRONT;
-        b->dev->CreateRasterizerState(b->dev, &rd, &b->rsFront);
+        b->dev->lpVtbl->CreateRasterizerState(b->dev, &rd, &b->rsFront);
         rd.CullMode = D3D10_CULL_BACK;
-        b->dev->CreateRasterizerState(b->dev, &rd, &b->rsBack);
+        b->dev->lpVtbl->CreateRasterizerState(b->dev, &rd, &b->rsBack);
     }
     {
         D3D10_DEPTH_STENCIL_DESC dsd;
         memset(&dsd, 0, sizeof(dsd));
         dsd.DepthEnable = FALSE;
-        b->dev->CreateDepthStencilState(b->dev, &dsd, &b->dsOff);
+        b->dev->lpVtbl->CreateDepthStencilState(b->dev, &dsd, &b->dsOff);
         dsd.DepthEnable = TRUE; dsd.DepthWriteMask = D3D10_DEPTH_WRITE_MASK_ALL;
         dsd.DepthFunc = D3D10_COMPARISON_LESS_EQUAL;
-        b->dev->CreateDepthStencilState(b->dev, &dsd, &b->dsOn);
+        b->dev->lpVtbl->CreateDepthStencilState(b->dev, &dsd, &b->dsOn);
     }
     b->viewport[0] = 1.0f; b->viewport[2] = 1.0f;
     ShowWindow(b->hwnd, SW_SHOW);
@@ -160,7 +180,7 @@ static int d3d10Init(PcBackend *self, int width, int height, const char *title)
 static void d3d10Shutdown(PcBackend *self)
 {
     D3D10Backend *b = (D3D10Backend *)self;
-#define REL(x) do { if (b->x) { b->x->Release(b->x); b->x = NULL; } } while (0)
+#define REL(x) do { if (b->x) { b->x->lpVtbl->Release(b->x); b->x = NULL; } } while (0)
     REL(swap); REL(rtv); REL(dsav); REL(depthTex); REL(vb);
     REL(vs); REL(ps); REL(layout); REL(rsNoCull); REL(rsFront); REL(rsBack);
     REL(dsOff); REL(dsOn); REL(dev);
@@ -177,7 +197,7 @@ static void d3d10EndFrame(PcBackend *self)
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
-    b->swap->Present(b->swap, 1, 0);
+    b->swap->lpVtbl->Present(b->swap, 1, 0);
 }
 
 static void d3d10BindRdram(PcBackend *self, const uint8_t *r, size_t s)
@@ -195,7 +215,7 @@ static void d3d10SetViewport(PcBackend *self, float lx, float ly, float sx, floa
     v.TopLeftX = 0; v.TopLeftY = 0;
     v.Width = b->width; v.Height = b->height;
     v.MinDepth = 0; v.MaxDepth = 1.0f;
-    b->dev->RSSetViewports(b->dev, 1, &v);
+    b->dev->lpVtbl->RSSetViewports(b->dev, 1, &v);
 }
 static void d3d10SetScissor(PcBackend *s, float l, float t, float r, float b) { (void)s;(void)l;(void)t;(void)r;(void)b; }
 static void d3d10SetOthermode(PcBackend *s, uint64_t h, uint64_t l) { (void)s;(void)h;(void)l; }
@@ -214,7 +234,8 @@ static void mapTri10(const PcVertex *v, const float vp[4], int w, int h, GpuVert
     out->x = (px / (float)w) * 2.0f - 1.0f;
     out->y = (py / (float)h) * 2.0f - 1.0f;
     out->z = v->pos[2] * 0.5f + 0.5f;
-    if (out->z < 0) out->z = 0; if (out->z > 1) out->z = 1;
+    if (out->z < 0) out->z = 0;
+    if (out->z > 1) out->z = 1;
     out->r = v->color[0]; out->g = v->color[1]; out->b = v->color[2]; out->a = v->color[3];
 }
 
@@ -227,17 +248,17 @@ static void d3d10DrawTris(PcBackend *self, const PcVertex *v0, const PcVertex *v
     mapTri10(v0, b->viewport, b->width, b->height, &tri[0]);
     mapTri10(v1, b->viewport, b->width, b->height, &tri[1]);
     mapTri10(v2, b->viewport, b->width, b->height, &tri[2]);
-    b->dev->RSSetState(b->dev, st->cull_face == 2 ? b->rsBack
+    b->dev->lpVtbl->RSSetState(b->dev, st->cull_face == 2 ? b->rsBack
                              : st->cull_face == 1 ? b->rsFront : b->rsNoCull);
-    b->dev->OMSetDepthStencilState(b->dev, st->depth_test ? b->dsOn : b->dsOff, 0);
-    b->dev->UpdateSubresource(b->dev, (ID3D10Resource *)b->vb, 0, NULL, tri, 0, 0);
-    b->dev->IASetInputLayout(b->dev, b->layout);
-    b->dev->IASetVertexBuffers(b->dev, 0, 1, &b->vb, &stride, &offset);
-    b->dev->IASetPrimitiveTopology(b->dev, D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    b->dev->VSSetShader(b->dev, b->vs);
-    b->dev->PSSetShader(b->dev, b->ps);
-    b->dev->OMSetRenderTargets(b->dev, 1, &b->rtv, b->dsav);
-    b->dev->Draw(b->dev, 3, 0);
+    b->dev->lpVtbl->OMSetDepthStencilState(b->dev, st->depth_test ? b->dsOn : b->dsOff, 0);
+    b->dev->lpVtbl->UpdateSubresource(b->dev, (ID3D10Resource *)b->vb, 0, NULL, tri, 0, 0);
+    b->dev->lpVtbl->IASetInputLayout(b->dev, b->layout);
+    b->dev->lpVtbl->IASetVertexBuffers(b->dev, 0, 1, &b->vb, &stride, &offset);
+    b->dev->lpVtbl->IASetPrimitiveTopology(b->dev, D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    b->dev->lpVtbl->VSSetShader(b->dev, b->vs);
+    b->dev->lpVtbl->PSSetShader(b->dev, b->ps);
+    b->dev->lpVtbl->OMSetRenderTargets(b->dev, 1, &b->rtv, b->dsav);
+    b->dev->lpVtbl->Draw(b->dev, 3, 0);
     b->draws++;
 }
 
@@ -250,10 +271,10 @@ static void d3d10FillRect(PcBackend *self, float x0, float y0, float x1, float y
     r.left = (LONG)x0; r.top = (LONG)y0; r.right = (LONG)x1 + 1; r.bottom = (LONG)y1 + 1;
     fc[0] = ((rgba >> 24) & 0xFF) / 255.0f; fc[1] = ((rgba >> 16) & 0xFF) / 255.0f;
     fc[2] = ((rgba >> 8) & 0xFF) / 255.0f;  fc[3] = (rgba & 0xFF) / 255.0f;
-    b->dev->ClearDepthStencilView(b->dev, b->dsav, D3D10_CLEAR_DEPTH, 1.0f, 0);
-    b->dev->RSSetScissorRects(b->dev, 1, &r);
-    b->dev->ClearRenderTargetView(b->dev, b->rtv, fc);
-    b->dev->RSSetScissorRects(b->dev, 0, NULL);
+    b->dev->lpVtbl->ClearDepthStencilView(b->dev, b->dsav, D3D10_CLEAR_DEPTH, 1.0f, 0);
+    b->dev->lpVtbl->RSSetScissorRects(b->dev, 1, &r);
+    b->dev->lpVtbl->ClearRenderTargetView(b->dev, b->rtv, fc);
+    b->dev->lpVtbl->RSSetScissorRects(b->dev, 0, NULL);
 }
 
 static void d3d10Clear(PcBackend *self, uint32_t rgba, float depth)
@@ -261,8 +282,8 @@ static void d3d10Clear(PcBackend *self, uint32_t rgba, float depth)
     D3D10Backend *b = (D3D10Backend *)self;
     float fc[4] = { ((rgba >> 24) & 0xFF) / 255.0f, ((rgba >> 16) & 0xFF) / 255.0f,
                     ((rgba >> 8) & 0xFF) / 255.0f, (rgba & 0xFF) / 255.0f };
-    b->dev->ClearRenderTargetView(b->dev, b->rtv, fc);
-    b->dev->ClearDepthStencilView(b->dev, b->dsav, D3D10_CLEAR_DEPTH, depth, 0);
+    b->dev->lpVtbl->ClearRenderTargetView(b->dev, b->rtv, fc);
+    b->dev->lpVtbl->ClearDepthStencilView(b->dev, b->dsav, D3D10_CLEAR_DEPTH, depth, 0);
 }
 
 static void d3d10GetSize(PcBackend *self, int *w, int *h)

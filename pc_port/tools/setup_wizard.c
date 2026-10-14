@@ -42,6 +42,8 @@
 #  include <windows.h>
 #  include <commdlg.h>   /* OPENFILENAMEW / GetOpenFileNameW (not pulled in by LEAN_AND_MEAN on mingw) */
 #  include <io.h>      /* access(), F_OK/X_OK shims for MSVC/mingw */
+#  include <sys/types.h>
+#  include <sys/stat.h> /* stat()/struct stat (also available on mingw/MSVC) */
 #  ifndef F_OK
 #    define F_OK 0
 #  endif
@@ -327,10 +329,10 @@ static int extract_assets(const char *dir, const char *rom_path)
         char ed[1024], ext[1300], cmd[1500];
         exe_dir(ed, sizeof ed);
 #ifdef WIZ_WIN
-        snprintf(ext, sizeof ext, "%sss_extract.exe", ed);
+        snprintf(ext, sizeof ext, "%s\\ssb_extract.exe", ed);
         snprintf(cmd, sizeof cmd, "\"%s\" \"%s\" \"%s\"", ext, rom_path, dir);
 #else
-        snprintf(ext, sizeof ext, "%sss_extract", ed);
+        snprintf(ext, sizeof ext, "%s/ssb_extract", ed);
         snprintf(cmd, sizeof cmd, "'%s' '%s' '%s'", ext, rom_path, dir);
 #endif
         {

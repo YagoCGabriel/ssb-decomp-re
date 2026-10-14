@@ -170,8 +170,18 @@ int main(int argc, char **argv) {
 
     /* ---- destination: <exe dir>/rom unless arg given ---- */
     char dest[1024];
-    if (argc > 2) snprintf(dest, sizeof dest, "%s", argv[2]);
-    else {
+    if (argc > 2) {
+        char base[1024];
+        snprintf(base, sizeof base, "%s", argv[2]);
+        /* strip trailing separator so the concat below is clean */
+        size_t bl = strlen(base);
+        while (bl && (base[bl - 1] == '/' || base[bl - 1] == '\\')) base[--bl] = '\0';
+#ifdef _WIN32
+        snprintf(dest, sizeof dest, "%s\\rom", base);
+#else
+        snprintf(dest, sizeof dest, "%s/rom", base);
+#endif
+    } else {
         char ed[512]; exe_dir(ed, sizeof ed);
         snprintf(dest, sizeof dest, "%srom", ed);
     }

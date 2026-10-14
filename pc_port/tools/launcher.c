@@ -205,13 +205,13 @@ static void exe_dir(char *out, size_t cap) {
     char *slash = strrchr(full, '\\');
     if (!slash) { snprintf(out, cap, "."); return; }
     *slash = '\0';
-    snprintf(out, cap, "%s", full);
+    snprintf(out, cap, "%s\\", full);   /* trailing separator */
 #else
     ssize_t n = readlink("/proc/self/exe", out, cap - 1);
     if (n <= 0) { snprintf(out, cap, "."); return; }
     out[n] = '\0';
     char *slash = strrchr(out, '/');
-    if (slash) *slash = '\0'; else snprintf(out, cap, ".");
+    if (slash) slash[1] = '\0'; else snprintf(out, cap, "./");
 #endif
 }
 
@@ -227,9 +227,9 @@ static int install_rom_local(void) {
     if (!g.rom[0]) return 0;
     exe_dir(dir, sizeof dir);
 #ifdef _WIN32
-    snprintf(dst, sizeof dst, "%s\\smash.z64", dir);
+    snprintf(dst, sizeof dst, "%ssmash.z64", dir);
 #else
-    snprintf(dst, sizeof dst, "%s/smash.z64", dir);
+    snprintf(dst, sizeof dst, "%ssmash.z64", dir);
 #endif
     if (!strcmp(g.rom, dst)) return 1; /* already installed here */
     in = fopen(g.rom, "rb");
@@ -246,33 +246,47 @@ static int install_rom_local(void) {
 }
 
 /* ------------------------------------------------------------- launching */
+static int find_game_exe(char *out, size_t cap) {
+    /* Search order: beside the launcher (dist layout), then build/,
+     * build/Release/ and pc_port/build/ under the current dir. */
+#ifdef _WIN32
+    const char *subdirs[] = { "", "build\\", "build\\Release\\",
+                              "pc_port\\build\\", "pc_port\\build\\Release\\", NULL };
+#else
+    const char *subdirs[] = { "", "build/", "pc_port/build/", NULL };
+#endif
+    char dir[1024];
+    exe_dir(dir, sizeof dir);
+    const char *bases[] = { dir, "./", NULL };
+    for (size_t b = 0; bases[b]; b++)
+        for (size_t i = 0; subdirs[i]; i++) {
+            snprintf(out, cap, "%s%s%s.exe", bases[b], subdirs[i], "ssb_pc");
+#ifdef _WIN32
+            FILE *t0 = fopen(out, "rb");
+            if (t0) { fclose(t0); return 1; }
+#endif
+            snprintf(out, cap, "%s%s%s", bases[b], subdirs[i], "ssb_pc");
+            FILE *t = fopen(out, "rb");
+            if (t) { fclose(t); return 1; }
+        }
+    return 0;
+}
+
 static int launch_game(int build_if_missing) {
     const char *ini = "ssb_config.ini";
+    char exe[1600] = "";
     if (g.rom[0] && !install_rom_local())
         printf("AVISO: nao foi possivel instalar a ROM ao lado dos executaveis;"
                " usando o caminho original.\n");
     if (save_ini(ini) != 0) { fprintf(stderr, "falha ao salvar %s\n", ini); return 1; }
     printf("config gravada em %s\n", ini);
 
-    const char *exe =
-#ifdef _WIN32
-        "build\\Release\\ssb_pc.exe";
-#else
-        "./build/ssb_pc";
-#endif
-    FILE *t = fopen(exe, "rb");
-    if (!t) {
-        exe =
-#ifdef _WIN32
-            "build\\ssb_pc.exe";
-#else
-            "./build/ssb_pc";
-#endif
-        t = fopen(exe, "rb");
-    }
-    if (t) fclose(t);
-    else {
-        if (!build_if_missing) { fprintf(stderr, "executavel do jogo nao encontrado\n"); return 1; }
+    if (!find_game_exe(exe, sizeof exe)) {
+        if (!build_if_missing) {
+            fprintf(stderr, "executavel do jogo nao encontrado;\n"
+                    "extraia todo o conteudo do zip para UMA pasta e rode o launcher de la.\n");
+            return 1;
+        }
         printf("compilando o executavel...\n");
 #ifdef _WIN32
         int rc = system("cmake -S . -B build && cmake --build build --config Release");
@@ -280,14 +294,19 @@ static int launch_game(int build_if_missing) {
         int rc = system("cmake -S . -B build >/dev/null && cmake --build build -j2");
 #endif
         if (rc != 0) { fprintf(stderr, "build falhou\n"); return 1; }
+        if (!find_game_exe(exe, sizeof exe)) {
+            fprintf(stderr, "executavel ainda nao encontrado apos build\n");
+            return 1;
+        }
     }
+    printf("executavel: %s\n", exe);
 
-    char cmd[1600];
+    char cmd[6400];
     snprintf(cmd, sizeof cmd,
 #ifdef _WIN32
              "set \"SSB_BACKEND=%s\" && set \"SSB_ROM=%s\" && \"%s\" --config %s",
 #else
-             "SSB_BACKEND='%s' SSB_ROM='%s' %s --config %s",
+             "SSB_BACKEND='%s' SSB_ROM='%s' '%s' --config %s",
 #endif
              g.backend, g.rom, exe, ini);
     printf("iniciando: %s\n", cmd);

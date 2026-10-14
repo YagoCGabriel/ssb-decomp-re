@@ -178,6 +178,7 @@ typedef struct PcDrawState {
     uint32_t geom_mode;
     uint32_t combine_a[4], combine_b[4], combine_c[4], combine_d[4];
     uint32_t tex_format, tex_size, tex_width;
+    uint32_t cimg_width;   /* framebuffer width from gsDPSetCImage */
     uintptr_t timg_addr;   /* segment-relative resolved address */
     uint32_t tlut_addr;
     uint32_t tex_tile;
